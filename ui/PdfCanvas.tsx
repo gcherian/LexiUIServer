@@ -6,7 +6,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
 type Box = { x0:number; y0:number; x1:number; y1:number; page:number };
 type Props = {
-  url: string;
+  url?: string;
   boxes?: Box[];
   onLasso?: (rect:{x0:number;y0:number;x1:number;y1:number})=>void;
 };
@@ -18,28 +18,38 @@ export default function PdfCanvas({ url, boxes=[], onLasso }: Props) {
   const [down, setDown] = useState<{x:number;y:number}|null>(null);
 
   useEffect(()=>{
+    if (!url) return;
     (async()=>{
       const doc = await pdfjsLib.getDocument(url).promise;
       const page = await doc.getPage(1);
       const vp = page.getViewport({ scale: 1.5 });
       const canvas = canvasRef.current!;
       canvas.width = vp.width; canvas.height = vp.height;
-      await page.render({ canvasContext: canvas.getContext("2d"), viewport: vp }).promise;
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+
       setViewport(vp);
     })();
   }, [url]);
 
   useEffect(()=>{
     if (!viewport) return;
-    const ov = overlayRef.current!, ctx = ov.getContext("2d")!;
+    const ov = overlayRef.current!;
+    const ctx = ov.getContext("2d");
+    if (!ctx) return;
     ov.width = viewport.width; ov.height = viewport.height;
     ctx.clearRect(0,0,ov.width,ov.height);
-    ctx.fillStyle = "rgba(0,160,255,.25)"; ctx.strokeStyle = "rgba(0,120,200,.9)"; ctx.lineWidth = 2;
+    ctx.fillStyle = "rgba(0,160,255,.25)";
+    ctx.strokeStyle = "rgba(0,120,200,.9)";
+    ctx.lineWidth = 2;
     for (const b of boxes){
       const r = viewport.convertToViewportRectangle([b.x0,b.y0,b.x1,b.y1]);
       const x = Math.min(r[0], r[2]), y = Math.min(r[1], r[3]);
       const w = Math.abs(r[2]-r[0]), h = Math.abs(r[3]-r[1]);
-      ctx.fillRect(x,y,w,h); ctx.strokeRect(x,y,w,h);
+      ctx.fillRect(x,y,w,h);
+      ctx.strokeRect(x,y,w,h);
     }
   }, [boxes, viewport]);
 

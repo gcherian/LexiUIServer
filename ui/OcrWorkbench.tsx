@@ -1,6 +1,6 @@
 import { useState } from "react";
 import PdfCanvas from "./PdfCanvas";
-import { uploadDoc, search, lasso, audit } from "../lib/api";
+import { uploadDoc, search, lasso, audit } from "../../lib/api";
 
 type Match = { page:number; bbox:{x0:number;y0:number;x1:number;y1:number}; text:string; score:number };
 
