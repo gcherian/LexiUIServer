@@ -1,35 +1,42 @@
-export const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:8000";
-
-export async function uploadDoc(file: File, backend: "tesseract"|"paddle"="tesseract") {
-  const fd = new FormData();
-  fd.append("pdf", file);
-  fd.append("backend", backend);
-  const r = await fetch(`${API_BASE}/upload`, { method: "POST", body: fd });
-  if (!r.ok) throw new Error(`Upload failed: ${r.status}`);
+export async function uploadDoc(API_BASE: string, file: File, engine: string) {
+  const form = new FormData();
+  form.append("pdf", file);           // name must match FastAPI param
+  form.append("backend", engine);     // "tesseract"
+  const r = await fetch(`${API_BASE}/upload`, { method: "POST", body: form });
+  if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
 
-export async function search(doc_id: string, query: string, topk=5) {
+export async function getMeta(API_BASE: string, docId: string) {
+  const r = await fetch(`${API_BASE}/doc/${docId}/meta`, { cache: "no-store" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function search(API_BASE: string, docId: string, q: string, topk = 20) {
   const r = await fetch(`${API_BASE}/search`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ doc_id, query, topk })
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ doc_id: docId, query: q, topk })
   });
-  if (!r.ok) throw new Error(`Search failed: ${r.status}`);
+  if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
 
-export async function lasso(doc_id: string, page: number, rect: {x0:number,y0:number,x1:number,y1:number}) {
+export async function lasso(API_BASE: string, docId: string, page: number, rect: any) {
   const r = await fetch(`${API_BASE}/lasso`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ doc_id, page, ...rect })
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ doc_id: docId, page, ...rect })
   });
-  if (!r.ok) throw new Error(`Lasso failed: ${r.status}`);
+  if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
 
-export async function audit(event: any) {
+export async function audit(API_BASE: string, payload: any) {
   await fetch(`${API_BASE}/audit`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(event)
-  }).catch(()=>{});
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify(payload)
+  });
 }

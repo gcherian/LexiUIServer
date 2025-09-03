@@ -9,36 +9,34 @@ import pytesseract
 from pytesseract import Output
 from rapidfuzz import fuzz
 
+
 router = APIRouter(prefix="/ocr", tags=["ocr"])
 
-# storage roots (reuse your app’s ENV if set)
 DATA_DIR = os.environ.get("LEXI_DATA", "data")
 OUT_DIR  = os.environ.get("LEXI_OUT",  "out")
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(OUT_DIR,  exist_ok=True)
 
-def _save_json(path: str, obj):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2)
-
 def _tesseract_tokens(pdf_path: str):
-    """Return word tokens and merged line segments with bboxes (page coords)."""
+    """Return tokens, segments, AND per-page raster sizes in px."""
     pages = convert_from_path(pdf_path, dpi=300)
-    tokens, segments = [], []
+    tokens, segments, sizes = [], [], []
     for pageno, img in enumerate(pages, start=1):
+        W, H = img.size  # <-- capture OCR coordinate space
+        sizes.append({"page": pageno, "width": W, "height": H, "dpi": 300})
+
         data = pytesseract.image_to_data(img, output_type=Output.DICT)
         n = len(data["text"])
         lines = {}
         for i in range(n):
             txt = (data["text"][i] or "").strip()
-            if not txt: 
+            if not txt:
                 continue
             try:
                 conf = float(data["conf"][i])
             except Exception:
                 conf = 0.0
-            x,y,w,h = map(float, (data["left"][i], data["top"][i], data["width"][i], data["height"][i]))
+            x,y,w,h = map(float,(data["left"][i], data["top"][i], data["width"][i], data["height"][i]))
             tok = {"text": txt, "conf": conf/100.0,
                    "bbox": {"page": pageno, "x0": x, "y0": y, "x1": x+w, "y1": y+h}}
             tokens.append(tok)
@@ -52,36 +50,50 @@ def _tesseract_tokens(pdf_path: str):
                 "text": " ".join(t["text"] for t in line),
                 "bbox": {"page": pageno, "x0": min(xs0), "y0": min(ys0), "x1": max(xs1), "y1": max(ys1)}
             })
-    return tokens, segments
-
-@router.get("/healthz")
-def healthz(): 
-    return {"ok": True}
+    return tokens, segments, sizes
 
 @router.post("/upload")
 async def upload(pdf: UploadFile = File(...), backend: str = Form("tesseract")):
-    """Save PDF, run OCR (tesseract), persist tokens/segments under OUT_DIR/<doc_id>."""
     doc_id = uuid4().hex[:12]
     pdf_path = os.path.join(DATA_DIR, f"{doc_id}.pdf")
     with open(pdf_path, "wb") as f:
         f.write(await pdf.read())
 
-    # swap this if you later call ECM DocAI
-    tokens, segments = _tesseract_tokens(pdf_path)
+    tokens, segments, sizes = _tesseract_tokens(pdf_path)
 
     out_dir = os.path.join(OUT_DIR, doc_id)
     os.makedirs(out_dir, exist_ok=True)
     _save_json(os.path.join(out_dir, "tokens.json"),   {"tokens": tokens})
     _save_json(os.path.join(out_dir, "segments.json"), {"segments": segments})
+    _save_json(os.path.join(out_dir, "meta.json"),     {"pages": sizes})
 
     return {
         "ok": True,
         "doc_id": doc_id,
-        "pdf_url": f"/data/{doc_id}.pdf",             # if you mount /data as static
         "annotated_tokens_url": f"/data/{doc_id}.pdf",
         "out_dir": f"/out/{doc_id}",
-        "stats": {"tokens": len(tokens), "segments": len(segments)}
+        "meta_url": f"/out/{doc_id}/meta.json",
+        "stats": {"tokens": len(tokens), "segments": len(segments), "pages": len(sizes)}
     }
+
+@router.get("/doc/{doc_id}/meta")
+def meta(doc_id: str):
+    p = os.path.join(OUT_DIR, doc_id, "meta.json")
+    if not os.path.exists(p):
+        raise HTTPException(404, "meta not found")
+    return json.load(open(p, encoding="utf-8"))
+
+
+
+def _save_json(path: str, obj):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2)
+
+@router.get("/healthz")
+def healthz(): 
+    return {"ok": True}
+
 
 class SearchReq(BaseModel):
     doc_id: str
