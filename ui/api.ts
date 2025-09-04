@@ -1,7 +1,8 @@
+// Existing ones
 export async function uploadDoc(API_BASE: string, file: File, engine: string) {
   const form = new FormData();
-  form.append("pdf", file);       // must match FastAPI param name
-  form.append("backend", engine); // e.g. "tesseract"
+  form.append("pdf", file);
+  form.append("backend", engine);
   const r = await fetch(`${API_BASE}/upload`, { method: "POST", body: form });
   if (!r.ok) throw new Error(await r.text());
   return r.json();
@@ -39,4 +40,23 @@ export async function audit(API_BASE: string, payload: any) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+}
+
+// -------- Optional endpoints for full-box hydration & save --------
+// If backend doesn't support them yet, these gracefully fallback.
+
+export async function getBoxes(API_BASE: string, docId: string) {
+  const r = await fetch(`${API_BASE}/doc/${docId}/boxes`, { cache: "no-store" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function saveBoxes(API_BASE: string, docId: string, boxes: any[]) {
+  const r = await fetch(`${API_BASE}/doc/${docId}/boxes`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ boxes }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
 }
