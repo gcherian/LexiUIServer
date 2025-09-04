@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import PdfViewer from "./PdfViewer";
 import {
   uploadDoc, getMeta, getBoxes, search,
-  getProm, setDocType, getFieldState, saveFieldState, ecmExtract, bindField
+  getProm, setDocType, getFieldState, saveFieldState, ecmExtract, bindField,
+  // optional, only if you added the list route:
+  // listProms
 } from "../../lib/api";
 import "./ocr.css";
 
@@ -17,26 +19,45 @@ const SERVER = "http://localhost:8000";
 const API    = "http://localhost:8000/lasso";
 
 export default function OcrWorkbench(){
-  // doc & pdf
+  // document
   const [doc, setDoc] = useState<any>(null);
   const [meta, setMeta] = useState<{pages:{page:number;width:number;height:number}[]} | null>(null);
 
   // ui state
   const [page, setPage] = useState(1);
   const [scale, setScale] = useState(1.25);
-  const [viewerOpen, setViewerOpen] = useState(false); // modal PDF viewer
+  const [viewerOpen, setViewerOpen] = useState(false);
+
+  // doctypes
+  const [doctype, setDoctypeState] = useState("invoice");
+  const [doctypeOptions, setDoctypeOptions] = useState<string[]>(["invoice", "lease_loan"]);
 
   // tables
-  const [doctype, setDoctypeState] = useState("ip_request_form");
-  const [fstate, setFstate] = useState<FieldDocState|null>(null);      // left table (key/value)
-  const [highlights, setHighlights] = useState<Box[]>([]);             // right table
+  const [fstate, setFstate] = useState<FieldDocState|null>(null);
+  const [highlights, setHighlights] = useState<Box[]>([]);
   const [filterKV, setFilterKV] = useState("");
   const [filterHL, setFilterHL] = useState("");
 
-  // binding state
+  // binding
   const [bindKey, setBindKey] = useState<string|null>(null);
 
-  // upload flow
+  // try to hydrate doctypes from server (optional)
+  useEffect(() => {
+    (async () => {
+      try {
+        // If you added /lasso/prom (list):
+        // const list = await listProms(API);
+        // const names = (list.doctypes || []).map((d:any) => d.doctype).filter(Boolean);
+        // if (names.length) setDoctypeOptions(names);
+        // Also validate the default:
+        await getProm(API, doctype); // ensures it exists
+      } catch {
+        // fall back to defaults; if default unknown on server, switch to invoice if available
+        if (!doctypeOptions.includes(doctype)) setDoctypeState("invoice");
+      }
+    })();
+  }, []);
+
   async function doUpload(e: ChangeEvent<HTMLInputElement>){
     const f = e.target.files?.[0]; if(!f) return;
     const res = await uploadDoc(API, f, "tesseract");
@@ -44,37 +65,23 @@ export default function OcrWorkbench(){
     setDoc({ ...res, pdfUrl });
 
     const m = await getMeta(API, res.doc_id); setMeta(m);
-    await setDocType(API, res.doc_id, doctype);               // init field state from PROM
+
+    // initialize field state from selected doctype
+    await setDocType(API, res.doc_id, doctype);
     const s = await getFieldState(API, res.doc_id); setFstate(s);
 
-    // hydrate highlights from OCR tokens as a baseline (optional)
-    try {
-      const bx = await getBoxes(API, res.doc_id);
-      setHighlights(bx);
-    } catch { setHighlights([]); }
+    // optional: prime highlights from OCR tokens
+    try { const bx = await getBoxes(API, res.doc_id); setHighlights(bx); } catch { setHighlights([]); }
 
     setPage(1); setScale(1.25);
   }
 
-  // prom selector (optional—preloaded on mount for validation)
-  useEffect(()=>{ getProm(API, doctype).catch(()=>{}); }, [doctype]);
-
-  // search -> populates Highlights table (orange conceptual layer)
-  async function doSearch(q: string){
-    if(!doc || !q.trim()) return;
-    const r = await search(API, doc.doc_id, q, 60);
-    const m: Match[] = r.matches || [];
-    setHighlights(m.map(({page,bbox}) => ({ page, ...bbox })));
-  }
-
-  // ECM extraction -> fills left table
   async function runECM(){
     if(!doc) return;
     const s = await ecmExtract(API, doc.doc_id, doctype);
     setFstate(s);
   }
 
-  // Save entire JSON (left table values, with any bbox we’ve bound)
   async function saveFields(){
     if(!doc || !fstate) return;
     const saved = await saveFieldState(API, doc.doc_id, fstate);
@@ -82,24 +89,27 @@ export default function OcrWorkbench(){
     alert("Saved extraction JSON.");
   }
 
-  // when user clicks “Bind from PDF” on a row
   function startBind(key: string){
     setBindKey(key);
     setViewerOpen(true);
   }
 
-  // lasso coming back from viewer
   async function onLasso(pageNum:number, rect:Rect){
     if(!doc || !bindKey || !fstate) return;
     const s = await bindField(API, doc.doc_id, bindKey, pageNum, rect);
     setFstate(s);
     setBindKey(null);
     setViewerOpen(false);
-    // ensure current page snaps to where they bound
     setPage(pageNum);
   }
 
-  // left table filtered rows
+  async function doSearch(q: string){
+    if(!doc || !q.trim()) return;
+    const r = await search(API, doc.doc_id, q, 60);
+    const m: Match[] = r.matches || [];
+    setHighlights(m.map(({page,bbox}) => ({ page, ...bbox })));
+  }
+
   const kvRows = useMemo(()=>{
     if(!fstate) return [];
     const q = filterKV.trim().toLowerCase();
@@ -108,7 +118,6 @@ export default function OcrWorkbench(){
     );
   }, [fstate, filterKV]);
 
-  // highlights table filtered rows (we show page + coords as columns)
   const hlRows = useMemo(()=>{
     const q = filterHL.trim().toLowerCase();
     return highlights.filter(b =>
@@ -121,24 +130,31 @@ export default function OcrWorkbench(){
   return (
     <div className="ocr-app">
 
-      {/* header */}
       <header className="ocr-header">
         <div className="brand">
           <span className="wf">WELLS FARGO</span><span className="pipe">|</span>
           <span className="app">EDIP · Extraction Review</span>
         </div>
         <div className="toolbar">
+
+          {/* Upload input — added */}
+          <div className="toolseg">
+            <label>Upload</label>
+            <input type="file" accept="application/pdf" onChange={doUpload} />
+          </div>
+
           <div className="toolseg">
             <label>DocType</label>
             <select value={doctype} onChange={e=> setDoctypeState(e.target.value)}>
-              <option value="ip_request_form">ip_request_form</option>
-              <option value="generic_form">generic_form</option>
+              {doctypeOptions.map(n => <option key={n} value={n}>{n}</option>)}
             </select>
           </div>
+
           <div className="toolseg">
             <button onClick={runECM} disabled={!doc}>Run ECM</button>
             <button className="primary" onClick={saveFields} disabled={!doc || !fstate}>Save JSON</button>
           </div>
+
           <div className="toolseg">
             <label>PDF</label>
             <div className="seg">
@@ -146,6 +162,7 @@ export default function OcrWorkbench(){
               {doc && <span className="meter">p{page}{meta?`/${meta.pages.length}`:""}</span>}
             </div>
           </div>
+
           <div className="toolseg">
             <label>Search</label>
             <div className="seg">
@@ -153,12 +170,20 @@ export default function OcrWorkbench(){
               <button onClick={()=>{ const q=(document.getElementById("q") as HTMLInputElement).value; doSearch(q); }}>Go</button>
             </div>
           </div>
+
+          {bindKey && (
+            <div className="toolseg">
+              <label>Binding</label>
+              <div className="seg">
+                <span className="meter">{bindKey}</span>
+                <button onClick={()=> setBindKey(null)}>Cancel</button>
+              </div>
+            </div>
+          )}
         </div>
       </header>
 
-      {/* main 2-column layout: left KV table, right Highlights table */}
       <main className="ocr-main" style={{gridTemplateColumns:"1fr 1fr"}}>
-        {/* LEFT: Key/Value grid */}
         <section className="panel">
           <div className="panel-title">Key ↔ Value</div>
           <div className="table-tools">
@@ -208,9 +233,8 @@ export default function OcrWorkbench(){
           </div>
         </section>
 
-        {/* RIGHT: Highlights table */}
         <section className="panel">
-          <div className="panel-title">Highlights (matches / tokens)</div>
+          <div className="panel-title">Highlights</div>
           <div className="table-tools">
             <input className="filter" placeholder="Filter by page/label…" value={filterHL} onChange={e=> setFilterHL(e.target.value)} />
           </div>
@@ -240,7 +264,6 @@ export default function OcrWorkbench(){
         </section>
       </main>
 
-      {/* modal PDF viewer for binding */}
       {viewerOpen && doc && ocrSize && (
         <PdfViewer
           url={doc.pdfUrl}
