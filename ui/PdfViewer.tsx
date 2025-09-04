@@ -30,6 +30,7 @@ export default function PdfViewerFS({
   const [vp, setVp] = useState<any>(null);
   const [err, setErr] = useState<string|null>(null);
 
+  // inline styles so CSS can’t shrink the modal
   const modal = { position:"fixed" as const, inset:0, background:"rgba(0,0,0,0.55)", display:"flex", alignItems:"center", justifyContent:"center", zIndex: 9999 };
   const frame = { width:"92vw", height:"88vh", background:"#fff", borderRadius:14, boxShadow:"0 10px 40px rgba(0,0,0,.4)", display:"grid", gridTemplateRows:"56px 1fr", overflow:"hidden" };
   const header = { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"0 14px", borderBottom:"1px solid #e5e5e5", background:"#fafafa" };
@@ -41,16 +42,18 @@ export default function PdfViewerFS({
     try{
       setErr(null);
       if(!pdfRef.current){
-        // IMPORTANT: URL must be absolute (http://localhost:8000/...)
+        // IMPORTANT: URL must be absolute (http://localhost:8000/data/...)
         pdfRef.current = await getDocument(url).promise;
       }
       const p = await pdfRef.current.getPage(pn);
       const viewport = p.getViewport({ scale: sc });
-      const c = base.current!; c.width = viewport.width; c.height = viewport.height;
+      const c = base.current!; 
+      c.width = viewport.width; c.height = viewport.height;
       const ctx = c.getContext("2d"); if(!ctx) return;
       await p.render({ canvasContext: ctx, viewport }).promise;
       setVp(viewport);
-      const ov = overlay.current!; ov.width = viewport.width; ov.height = viewport.height;
+      const ov = overlay.current!; 
+      ov.width = viewport.width; ov.height = viewport.height;
     }catch(e:any){ setErr(e?.message || "Failed to render PDF"); console.error(e); }
   }
 
@@ -79,7 +82,7 @@ export default function PdfViewerFS({
             <span style={{width:8}}/>
             <button onClick={()=> onZoom(Math.max(0.5, +(scale-0.25).toFixed(2)))}>-</button>
             <span style={{fontFamily:"monospace"}}>{scale.toFixed(2)}x</span>
-            <button onClick={()=> onZoom(+(scale+0.25).toFixed(2)))}>+</button>
+            <button onClick={()=> onZoom(+(scale+0.25).toFixed(2))}>+</button>
             <span style={{width:8}}/>
             <button onClick={onClose}>Close</button>
           </div>
