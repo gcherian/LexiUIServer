@@ -1,0 +1,17 @@
+{
+  "doctype": "lease_loan",
+  "version": "2025-09-04",
+  "fields": [
+    { "key": "customer_name",     "label": "Customer Name",     "type": "string",  "required": true },
+    { "key": "customer_address",  "label": "Customer Address",  "type": "string" },
+    { "key": "billing_address",   "label": "Billing Address",   "type": "string" },
+    { "key": "ownership_type",    "label": "Ownership Type",    "type": "string",  "enum": ["Owned","Leased","Rented","Other"] },
+    { "key": "city",              "label": "City",              "type": "string" },
+    { "key": "state",             "label": "State",             "type": "string" },
+    { "key": "zip",               "label": "ZIP",               "type": "string" },
+    { "key": "loan_number",       "label": "Loan Number",       "type": "string" },
+    { "key": "term_months",       "label": "Term (months)",     "type": "integer" },
+    { "key": "apr",               "label": "APR",               "type": "number" },
+    { "key": "monthly_payment",   "label": "Monthly Payment",   "type": "number" }
+  ]
+}

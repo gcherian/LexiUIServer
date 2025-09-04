@@ -1,0 +1,27 @@
+{
+  "doc_id": "inv_001",
+  "doctype": "invoice",
+  "fields": [
+    { "key": "partner_name",     "value": "Acme Supply Co.",         "confidence": 0.89, "bbox": null },
+    { "key": "invoice_number",   "value": "INV-2025-0904-17",        "confidence": 0.94, "bbox": null },
+    { "key": "invoice_date",     "value": "2025-09-01",              "confidence": 0.90, "bbox": null },
+    { "key": "customer_name",    "value": "Globex Corp",             "confidence": 0.88, "bbox": null },
+    { "key": "customer_address", "value": "742 Evergreen Terrace",   "confidence": 0.76, "bbox": null },
+    { "key": "city",             "value": "Bangalore",               "confidence": 0.71, "bbox": null },
+    { "key": "state",            "value": "KA",                      "confidence": 0.70, "bbox": null },
+    { "key": "zip",              "value": "560001",                  "confidence": 0.70, "bbox": null },
+    { "key": "subtotal",         "value": "12500.00",                "confidence": 0.93, "bbox": null },
+    { "key": "tax",              "value": "2250.00",                 "confidence": 0.92, "bbox": null },
+    { "key": "total",            "value": "14750.00",                "confidence": 0.97, "bbox": null },
+
+    {
+      "key": "equipment",
+      "value": [
+        { "line_no": 1, "description": "Router X100", "sku": "RX100", "qty": 2, "unit_price": 3500, "amount": 7000 },
+        { "line_no": 2, "description": "Switch S24",  "sku": "S24",   "qty": 1, "unit_price": 5500, "amount": 5500 }
+      ],
+      "confidence": 0.85,
+      "bbox": null
+    }
+  ]
+}

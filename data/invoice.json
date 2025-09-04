@@ -1,0 +1,36 @@
+{
+  "doctype": "invoice",
+  "version": "2025-09-04",
+  "fields": [
+    { "key": "partner_name",     "label": "Partner Name",        "type": "string",  "required": true },
+    { "key": "invoice_number",   "label": "Invoice Number",      "type": "string",  "required": true },
+    { "key": "invoice_date",     "label": "Invoice Date",        "type": "date" },
+    { "key": "customer_name",    "label": "Customer Name",       "type": "string" },
+    { "key": "customer_address", "label": "Customer Address",    "type": "string" },
+    { "key": "city",             "label": "City",                "type": "string" },
+    { "key": "state",            "label": "State",               "type": "string" },
+    { "key": "zip",              "label": "ZIP",                 "type": "string" },
+    { "key": "billing_address",  "label": "Billing Address",     "type": "string" },
+    { "key": "subtotal",         "label": "Subtotal",            "type": "number" },
+    { "key": "tax",              "label": "Tax",                 "type": "number" },
+    { "key": "total",            "label": "Total",               "type": "number" },
+
+    {
+      "key": "equipment",
+      "label": "Equipment Table",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "line_no":     { "type": "integer" },
+          "description": { "type": "string"  },
+          "sku":         { "type": "string"  },
+          "qty":         { "type": "number"  },
+          "unit_price":  { "type": "number"  },
+          "amount":      { "type": "number"  }
+        },
+        "required": ["description", "qty", "amount"]
+      }
+    }
+  ]
+}
