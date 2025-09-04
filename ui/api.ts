@@ -1,7 +1,5 @@
+// lib/api.ts — complete & aligned with /lasso router
 
-// lib/api.ts — complete
-
-// -------- OCR / PDF core --------
 export async function uploadDoc(API_BASE: string, file: File, engine: string) {
   const form = new FormData();
   form.append("pdf", file);
@@ -71,7 +69,12 @@ export async function audit(API_BASE: string, payload: any) {
   });
 }
 
-// -------- PROM / Doctype / Field state --------
+export async function listProms(API_BASE: string) {
+  const r = await fetch(`${API_BASE}/prom`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json(); // { doctypes: [{doctype, file}] }
+}
+
 export async function getProm(API_BASE: string, doctype: string) {
   const r = await fetch(`${API_BASE}/prom/${doctype}`);
   if (!r.ok) throw new Error(await r.text());
@@ -83,6 +86,17 @@ export async function setDocType(API_BASE: string, docId: string, doctype: strin
     method: "POST",
     headers: {"Content-Type":"application/json"},
     body: JSON.stringify({ doctype })
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+// also supports the short form POST /lasso/doc with {doc_id, doctype}
+export async function setDocTypeShort(API_BASE: string, docId: string, doctype: string) {
+  const r = await fetch(`${API_BASE}/doc`, {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ doc_id: docId, doctype })
   });
   if (!r.ok) throw new Error(await r.text());
   return r.json();
@@ -104,6 +118,7 @@ export async function saveFieldState(API_BASE: string, docId: string, state: any
   return r.json();
 }
 
+// ECM auto-inits fields if missing
 export async function ecmExtract(API_BASE: string, docId: string, doctype: string) {
   const r = await fetch(`${API_BASE}/ecm/extract`, {
     method:"POST",
@@ -123,4 +138,3 @@ export async function bindField(API_BASE: string, docId: string, key: string, pa
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
-

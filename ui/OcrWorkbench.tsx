@@ -2,9 +2,7 @@ import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import PdfViewer from "./PdfViewer";
 import {
   uploadDoc, getMeta, getBoxes, search,
-  getProm, setDocType, getFieldState, saveFieldState, ecmExtract, bindField,
-  // optional, only if you added the list route:
-  // listProms
+  listProms, getProm, setDocType, getFieldState, saveFieldState, ecmExtract, bindField
 } from "../../lib/api";
 import "./ocr.css";
 
@@ -15,58 +13,49 @@ type Match = { page:number; bbox:Rect; text:string; score:number };
 type FieldState = { key:string; value?:string|null; bbox?: (Rect & {page:number})|null; source:string; confidence:number };
 type FieldDocState = { doc_id:string; doctype:string; fields: FieldState[]; audit:any[] };
 
-const SERVER = "http://localhost:8000";
 const API    = "http://localhost:8000/lasso";
 
 export default function OcrWorkbench(){
-  // document
   const [doc, setDoc] = useState<any>(null);
   const [meta, setMeta] = useState<{pages:{page:number;width:number;height:number}[]} | null>(null);
 
-  // ui state
   const [page, setPage] = useState(1);
   const [scale, setScale] = useState(1.25);
   const [viewerOpen, setViewerOpen] = useState(false);
 
-  // doctypes
   const [doctype, setDoctypeState] = useState("invoice");
-  const [doctypeOptions, setDoctypeOptions] = useState<string[]>(["invoice", "lease_loan"]);
+  const [doctypeOptions, setDoctypeOptions] = useState<string[]>(["invoice","lease_loan"]);
 
-  // tables
   const [fstate, setFstate] = useState<FieldDocState|null>(null);
   const [highlights, setHighlights] = useState<Box[]>([]);
   const [filterKV, setFilterKV] = useState("");
   const [filterHL, setFilterHL] = useState("");
-
-  // binding
   const [bindKey, setBindKey] = useState<string|null>(null);
 
-  // try to hydrate doctypes from server (optional)
   useEffect(() => {
     (async () => {
       try {
-        // If you added /lasso/prom (list):
-        // const list = await listProms(API);
-        // const names = (list.doctypes || []).map((d:any) => d.doctype).filter(Boolean);
-        // if (names.length) setDoctypeOptions(names);
-        // Also validate the default:
-        await getProm(API, doctype); // ensures it exists
+        const list = await listProms(API);
+        const names = (list.doctypes || []).map((d:any)=> d.doctype).filter(Boolean);
+        if (names.length) setDoctypeOptions(names);
+        // sanity check default exists
+        await getProm(API, doctype);
       } catch {
-        // fall back to defaults; if default unknown on server, switch to invoice if available
-        if (!doctypeOptions.includes(doctype)) setDoctypeState("invoice");
+        // keep defaults
       }
     })();
   }, []);
 
+  function toAbs(u: string){ return u.startsWith("http") ? u : `http://localhost:8000${u}`; }
+
   async function doUpload(e: ChangeEvent<HTMLInputElement>){
     const f = e.target.files?.[0]; if(!f) return;
     const res = await uploadDoc(API, f, "tesseract");
-    const pdfUrl = `${SERVER}${res.annotated_tokens_url}?t=${Date.now()}`;
+    const pdfUrl = toAbs(res.annotated_tokens_url);
     setDoc({ ...res, pdfUrl });
-
     const m = await getMeta(API, res.doc_id); setMeta(m);
 
-    // initialize field state from selected doctype
+    // init fields for selected doctype
     await setDocType(API, res.doc_id, doctype);
     const s = await getFieldState(API, res.doc_id); setFstate(s);
 
@@ -78,7 +67,7 @@ export default function OcrWorkbench(){
 
   async function runECM(){
     if(!doc) return;
-    const s = await ecmExtract(API, doc.doc_id, doctype);
+    const s = await ecmExtract(API, doc.doc_id, doctype); // auto-inits if missing
     setFstate(s);
   }
 
@@ -89,10 +78,7 @@ export default function OcrWorkbench(){
     alert("Saved extraction JSON.");
   }
 
-  function startBind(key: string){
-    setBindKey(key);
-    setViewerOpen(true);
-  }
+  function startBind(key: string){ setBindKey(key); setViewerOpen(true); }
 
   async function onLasso(pageNum:number, rect:Rect){
     if(!doc || !bindKey || !fstate) return;
@@ -129,15 +115,12 @@ export default function OcrWorkbench(){
 
   return (
     <div className="ocr-app">
-
       <header className="ocr-header">
         <div className="brand">
           <span className="wf">WELLS FARGO</span><span className="pipe">|</span>
           <span className="app">EDIP · Extraction Review</span>
         </div>
         <div className="toolbar">
-
-          {/* Upload input — added */}
           <div className="toolseg">
             <label>Upload</label>
             <input type="file" accept="application/pdf" onChange={doUpload} />
@@ -220,8 +203,7 @@ export default function OcrWorkbench(){
                       <div className="row-actions">
                         <button onClick={()=> startBind(f.key)} disabled={!doc}>Bind from PDF</button>
                         {f.bbox && <button onClick={()=>{
-                          setPage(f.bbox!.page);
-                          setViewerOpen(true);
+                          setPage(f.bbox!.page); setViewerOpen(true);
                         }}>View bbox</button>}
                       </div>
                     </td>
@@ -280,3 +262,4 @@ export default function OcrWorkbench(){
     </div>
   );
 }
+
