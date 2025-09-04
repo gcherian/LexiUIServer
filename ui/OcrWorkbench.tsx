@@ -48,6 +48,12 @@ export default function OcrWorkbench(){
 
   function toAbs(u: string){ return u.startsWith("http") ? u : `http://localhost:8000${u}`; }
 
+async function doSemantic(q: string){
+  if(!doc || !q.trim()) return;
+  const r = await semanticSearch(API, doc.doc_id, q, 5);
+  if (r.results?.length) setPage(r.results[0].page);  // jump to best page
+}
+
   async function doUpload(e: ChangeEvent<HTMLInputElement>){
     const f = e.target.files?.[0]; if(!f) return;
     const res = await uploadDoc(API, f, "tesseract");
@@ -177,6 +183,20 @@ export default function OcrWorkbench(){
               <button onClick={()=>{ const q=(document.getElementById("q") as HTMLInputElement).value; doSearch(q); }}>Go</button>
             </div>
           </div>
+
+
+<div className="toolseg">
+  <label>Semantic</label>
+  <div className="seg">
+    <input
+      id="qs"
+      className="w200"
+      placeholder="Meaning-based…"
+      onKeyDown={(e)=>{ if(e.key==="Enter"){ const v=(e.target as HTMLInputElement).value; doSemantic(v); }}}
+    />
+    <button onClick={()=>{ const v=(document.getElementById("qs") as HTMLInputElement).value; doSemantic(v); }}>Jump</button>
+  </div>
+</div>
 
           <div className="toolseg">
             <label>Semantic</label>

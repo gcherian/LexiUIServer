@@ -138,3 +138,13 @@ export async function bindField(API_BASE: string, docId: string, key: string, pa
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
+
+export async function semanticSearch(API_BASE: string, docId: string, q: string, topk = 5) {
+  const url = new URL(`${API_BASE}/semantic_search`);
+  url.searchParams.set("doc_id", docId);
+  url.searchParams.set("q", q);
+  url.searchParams.set("topk", String(topk));
+  const r = await fetch(url.toString());
+  if (!r.ok) throw new Error(await r.text());
+  return r.json(); // { results: [{page, score}] }
+}
