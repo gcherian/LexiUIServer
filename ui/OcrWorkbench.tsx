@@ -339,20 +339,31 @@ async function doSemantic(q: string){
           </div>
         </section>
       </main>
-
       {viewerOpen && doc && ocrSize && (
-        <PdfViewerFS
-          url={doc.pdfUrl}                      // absolute URL
-          page={page}
-          onClose={()=> setViewerOpen(false)}
-          onChangePage={(p)=> setPage(Math.max(1, p))}
-          scale={scale}
-          onZoom={(s)=> setScale(s)}
-          ocrSize={{ width: ocrSize.width, height: ocrSize.height }}
-          bindKey={bindKey}
-          onLasso={onLasso}
-        />
-      )}
+  <PdfViewerFS
+    url={doc.pdfUrl}
+    page={page}
+    onClose={()=> setViewerOpen(false)}
+    onChangePage={(p)=> setPage(Math.max(1, p))}
+    scale={scale}
+    onZoom={(s)=> setScale(s)}
+    ocrSize={{ width: ocrSize.width, height: ocrSize.height }}
+
+    // NEW: pass overlays
+    ocrBoxes={highlights}               // all OCR tokens or from getBoxes()
+    highlightBoxes={highlights}         // reuse for now, or keep separate
+    boundBoxes={fstate?.fields
+      .filter(f=>f.bbox)
+      .map((f,i)=> ({...f.bbox!, id:f.key, page:f.bbox!.page, label:f.key, text:f.value||""}))
+      || []}
+    selectedBoxIds={bindKey ? [bindKey] : []}
+
+    bindKey={bindKey}
+    onLasso={onLasso}
+  />
+)}
+
+
     </div>
   );
 }

@@ -1,32 +1,46 @@
 import { useEffect, useRef, useState } from "react";
 import { getDocument, GlobalWorkerOptions } from "pdfjs-dist";
 
+/** pdfjs-dist v4 ESM worker (Vite-friendly) */
 GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
   import.meta.url
 ).toString();
 
+/** Basic rect types */
 export type Rect = { x0: number; y0: number; x1: number; y1: number };
 export type Box  = Rect & { page: number; id?: string; label?: string; text?: string };
 
+/** Props */
 type Props = {
   url?: string;
   page: number;
 
-  // Layers
-  ocrBoxes?: Box[];              // all OCR tokens (light blue)
-  highlightBoxes?: Box[];        // search hits (orange)
-  boundBoxes?: Box[];            // user-bound edits (green)
+  /** Overlay layers */
+  ocrBoxes?: Box[];              // light blue: all OCR tokens
+  highlightBoxes?: Box[];        // orange: search / semantic hits
+  boundBoxes?: Box[];            // green: user-bound fields
+  selectedBoxIds?: string[];     // purple emphasis for ids
 
-  // Selection/linking
-  selectedBoxIds?: string[];
+  /** Linking (select tool) */
   onSelectBox?: (boxId: string, boxIndex: number) => void;
 
-  // Geometry from OCR run
-  ocrSize?: { width: number; height: number }; // OCR pixel size per page (pre-rotation)
+  /** Page geometry (OCR space) */
+  ocrSize?: { width: number; height: number };
+
+  /** Zoom */
   scale?: number;
+
+  /** Tools */
   tool?: "select" | "lasso";
-  onLasso?: (rect: Rect) => void;              // returns OCR-space rect (pre-rotation)
+  onLasso?: (rect: Rect) => void;
+
+  /**
+   * Rotation handling:
+   * - "auto": respect PDF page rotation (most robust if your OCR ran on unrotated rasters)
+   * - "none": force rotation 0 (use if your PDFs are already visually upright)
+   */
+  rotationMode?: "auto" | "none";
 };
 
 type VpInfo = { wCss:number; hCss:number; dpr:number; rotation:number };
@@ -43,19 +57,20 @@ export default function PdfCanvas({
   scale = 1.25,
   tool = "select",
   onLasso,
+  rotationMode = "auto",
 }: Props) {
   const pdfRef = useRef<any>(null);
   const [vp, setVp] = useState<VpInfo | null>(null);
   const baseCanvas = useRef<HTMLCanvasElement>(null);
   const overlay = useRef<HTMLCanvasElement>(null);
 
+  // lasso drag state (in overlay CSS px)
   const [dragStart, setDragStart] = useState<{ x:number; y:number } | null>(null);
   const [dragNow, setDragNow]     = useState<{ x:number; y:number } | null>(null);
 
-  // ----- rotation helpers (OCR <-> viewport) -----
+  // ---------- rotation helpers (OCR <-> viewport) ----------
   function rotatePoint(x:number, y:number, W:number, H:number, rot:number) {
-    // rot in {0,90,180,270} clockwise. Input: OCR coords (pre-rotation)
-    switch (rot) {
+    switch (rot) { // clockwise
       case 0:   return { x,           y };
       case 90:  return { x: y,        y: W - x };
       case 180: return { x: W - x,    y: H - y };
@@ -64,8 +79,7 @@ export default function PdfCanvas({
     }
   }
   function invRotatePoint(x:number, y:number, W:number, H:number, rot:number) {
-    // inverse mapping: viewport -> OCR
-    switch (rot) {
+    switch (rot) { // inverse
       case 0:   return { x,            y };
       case 90:  return { x: W - y,     y: x };
       case 180: return { x: W - x,     y: H - y };
@@ -74,45 +88,50 @@ export default function PdfCanvas({
     }
   }
 
-  // ----- render PDF (offscreen, rotation-aware) -----
+  // ---------- render PDF (offscreen, DPR-safe) ----------
   async function renderPage(pnum:number, zoom:number){
     if (!pdfRef.current || !baseCanvas.current) return;
     const dpr = Math.max(1, window.devicePixelRatio || 1);
 
     const pageObj = await pdfRef.current.getPage(pnum);
-    const rotation: number = (pageObj.rotate || 0) % 360;              // PDF’s own rotation
-    const viewport = pageObj.getViewport({ scale: zoom * dpr, rotation, dontFlip: true });
+    const pageRot = (pageObj.rotate || 0) % 360;
 
+    // Choose rotation based on mode
+    const useRotation = rotationMode === "auto" ? pageRot : 0;
+
+    const viewport = pageObj.getViewport({ scale: zoom * dpr, rotation: useRotation });
+
+    // render into an offscreen buffer to keep main canvas transform clean
     const work = document.createElement("canvas");
     work.width  = Math.floor(viewport.width);
     work.height = Math.floor(viewport.height);
     const wctx = work.getContext("2d"); if (!wctx) return;
     wctx.setTransform(1,0,0,1,0,0);
     wctx.clearRect(0,0,work.width,work.height);
-
     await pageObj.render({ canvasContext: wctx, viewport }).promise;
 
+    // blit to visible canvas
     const c = baseCanvas.current!;
     c.width  = work.width;
     c.height = work.height;
     c.style.width  = `${Math.floor(work.width / dpr)}px`;
     c.style.height = `${Math.floor(work.height / dpr)}px`;
-
     const ctx = c.getContext("2d"); if (!ctx) return;
     ctx.setTransform(1,0,0,1,0,0);
     ctx.clearRect(0,0,c.width,c.height);
     ctx.drawImage(work, 0, 0);
 
+    // overlay sizing
     const ov = overlay.current!;
     ov.width  = c.width;
     ov.height = c.height;
     ov.style.width  = c.style.width;
     ov.style.height = c.style.height;
 
-    setVp({ wCss: Math.floor(work.width / dpr), hCss: Math.floor(work.height / dpr), dpr, rotation });
+    setVp({ wCss: Math.floor(work.width / dpr), hCss: Math.floor(work.height / dpr), dpr, rotation: useRotation });
   }
 
-  // ----- load PDF -----
+  // load PDF once
   useEffect(() => {
     if (!url) return;
     (async () => {
@@ -122,15 +141,15 @@ export default function PdfCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url]);
 
-  // ----- re-render on page/scale -----
+  // re-render on page / scale
   useEffect(() => {
     if (!pdfRef.current) return;
     renderPage(page, scale);
     setDragStart(null); setDragNow(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, scale]);
+  }, [page, scale, rotationMode]);
 
-  // ----- draw overlays (OCR -> viewport with rotation) -----
+  // ---------- draw overlays ----------
   useEffect(() => {
     if (!vp || !overlay.current) return;
     const ov = overlay.current;
@@ -141,16 +160,16 @@ export default function PdfCanvas({
 
     if (!ocrSize) return;
 
-    // If page is rotated 90/270, viewport's width/height correspond to swapped OCR dims.
     const oW = ocrSize.width, oH = ocrSize.height;
     const vWcss = vp.wCss, vHcss = vp.hCss;
 
-    // CSS→device scale
-    const sx = (vWcss / (vp.rotation % 180 === 0 ? oW : oH)) * vp.dpr;
-    const sy = (vHcss / (vp.rotation % 180 === 0 ? oH : oW)) * vp.dpr;
+    // CSS→device scaling factors, accounting for rotation (90/270 swaps dims)
+    const rotated = vp.rotation % 180 !== 0;
+    const sx = (vWcss / (rotated ? oH : oW)) * vp.dpr;
+    const sy = (vHcss / (rotated ? oW : oH)) * vp.dpr;
 
     const draw = (r:Rect, mode:"ocr"|"hl"|"bound"|"selected") => {
-      // transform the four corners, then compute axis-aligned bounds in viewport space
+      // rotate OCR rect corners into viewport space
       const p1 = rotatePoint(r.x0, r.y0, oW, oH, vp.rotation);
       const p2 = rotatePoint(r.x1, r.y1, oW, oH, vp.rotation);
       const x0 = Math.min(p1.x, p2.x) * sx;
@@ -160,13 +179,13 @@ export default function PdfCanvas({
       drawStyledRect(ctx, x0, y0, x1 - x0, y1 - y0, mode);
     };
 
-    // 1) OCR (blue)
-    ocrBoxes.forEach((b) => { if (b.page === page) draw(b, "ocr"); });
+    // 1) OCR tokens (blue)
+    ocrBoxes.forEach(b => { if (b.page === page) draw(b, "ocr"); });
     // 2) Highlights (orange)
-    highlightBoxes.forEach((h) => { if (h.page === page) draw(h, "hl"); });
+    highlightBoxes.forEach(h => { if (h.page === page) draw(h, "hl"); });
     // 3) Bound (green)
-    boundBoxes.forEach((g) => { if (g.page === page) draw(g, "bound"); });
-    // 4) Selected (purple)
+    boundBoxes.forEach(g => { if (g.page === page) draw(g, "bound"); });
+    // 4) Selected (purple) — emphasize on top
     if (selectedBoxIds?.length) {
       const ids = new Set(selectedBoxIds);
       [...ocrBoxes, ...highlightBoxes, ...boundBoxes].forEach((b) => {
@@ -175,7 +194,7 @@ export default function PdfCanvas({
       });
     }
 
-    // live lasso (viewport CSS → device px)
+    // live lasso (only while dragging)
     if (tool === "lasso" && dragStart && dragNow) {
       const x0css = Math.min(dragStart.x, dragNow.x);
       const y0css = Math.min(dragStart.y, dragNow.y);
@@ -195,7 +214,7 @@ export default function PdfCanvas({
     }
   }, [ocrBoxes, highlightBoxes, boundBoxes, selectedBoxIds, page, vp, ocrSize, tool, dragStart, dragNow]);
 
-  // ----- hit testing (select tool) -----
+  // ---------- hit testing (select tool) ----------
   function hitTestClient(clientX: number, clientY: number): { id?:string; idx:number } | null {
     if (!overlay.current || !vp || !ocrSize) return null;
     const r = overlay.current.getBoundingClientRect();
@@ -205,9 +224,9 @@ export default function PdfCanvas({
     // viewport CSS → OCR px (inverse rotation)
     const vWcss = vp.wCss, vHcss = vp.hCss;
     const oW = ocrSize.width, oH = ocrSize.height;
-
-    const sxInv = (vp.rotation % 180 === 0 ? oW : oH) / vWcss;
-    const syInv = (vp.rotation % 180 === 0 ? oH : oW) / vHcss;
+    const rotated = vp.rotation % 180 !== 0;
+    const sxInv = (rotated ? oH : oW) / vWcss;
+    const syInv = (rotated ? oW : oH) / vHcss;
 
     const vx = pxCss * sxInv;
     const vy = pyCss * syInv;
@@ -223,16 +242,15 @@ export default function PdfCanvas({
     for (const { arr } of layers) {
       for (let i = arr.length - 1; i >= 0; i--) {
         const b = arr[i];
-        if (p.x >= Math.min(b.x0, b.x1) && p.x <= Math.max(b.x0, b.x1) &&
-            p.y >= Math.min(b.y0, b.y1) && p.y <= Math.max(b.y0, b.y1)) {
-          return { id: b.id, idx: i };
-        }
+        const x0 = Math.min(b.x0, b.x1), x1 = Math.max(b.x0, b.x1);
+        const y0 = Math.min(b.y0, b.y1), y1 = Math.max(b.y0, b.y1);
+        if (p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1) return { id: b.id, idx: i };
       }
     }
     return null;
   }
 
-  // ----- pointer handlers -----
+  // ---------- pointer handlers ----------
   const onMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const el = overlay.current; if (!el) return;
     const r = el.getBoundingClientRect();
@@ -267,8 +285,9 @@ export default function PdfCanvas({
     // viewport CSS → OCR px rect (inverse rotation)
     const vWcss = vp.wCss, vHcss = vp.hCss;
     const oW = ocrSize.width, oH = ocrSize.height;
-    const sxInv = (vp.rotation % 180 === 0 ? oW : oH) / vWcss;
-    const syInv = (vp.rotation % 180 === 0 ? oH : oW) / vHcss;
+    const rotated = vp.rotation % 180 !== 0;
+    const sxInv = (rotated ? oH : oW) / vWcss;
+    const syInv = (rotated ? oW : oH) / vHcss;
 
     const a = invRotatePoint(x0css * sxInv, y0css * syInv, oW, oH, vp.rotation);
     const b = invRotatePoint(x1css * sxInv, y1css * syInv, oW, oH, vp.rotation);
@@ -304,7 +323,7 @@ export default function PdfCanvas({
   );
 }
 
-// ---------- drawing ----------
+/** Drawing with palettes per layer */
 function drawStyledRect(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
@@ -312,20 +331,20 @@ function drawStyledRect(
 ) {
   ctx.save();
   ctx.setTransform(1,0,0,1,0,0);
-  if (mode === "hl") {                 // orange
+  if (mode === "hl") {
     ctx.lineWidth = 3;
     ctx.strokeStyle = "rgba(255,140,0,0.95)";
     ctx.fillStyle   = "rgba(255,170,0,0.20)";
-  } else if (mode === "bound") {       // green
+  } else if (mode === "bound") {
     ctx.lineWidth = 3;
     ctx.strokeStyle = "rgba(16,158,0,1)";
     ctx.fillStyle   = "rgba(16,158,0,0.18)";
-  } else if (mode === "selected") {    // purple
+  } else if (mode === "selected") {
     ctx.lineWidth = 4;
     ctx.setLineDash([8, 5]);
     ctx.strokeStyle = "rgba(145, 66, 255, 1)";
     ctx.fillStyle   = "rgba(145, 66, 255, 0.10)";
-  } else {                             // ocr (blue)
+  } else {
     ctx.lineWidth = 1.75;
     ctx.strokeStyle = "rgba(0,120,200,0.9)";
     ctx.fillStyle   = "rgba(0,160,255,0.10)";
