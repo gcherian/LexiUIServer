@@ -62,8 +62,9 @@ export default function PdfCanvas({
     // set CSS display size (CSS pixels)
     c.style.width  = `${Math.floor(viewport.width / dpr)}px`;
     c.style.height = `${Math.floor(viewport.height / dpr)}px`;
-    // reset any stray transforms (prevents accidental mirror)
+
     const ctx = c.getContext("2d"); if (!ctx) return;
+    // prevent mirrored/flipped PDF and stale transforms
     ctx.setTransform(1,0,0,1,0,0);
     ctx.clearRect(0,0,c.width,c.height);
 
@@ -93,7 +94,7 @@ export default function PdfCanvas({
   useEffect(() => {
     if (!pdfRef.current) return;
     renderPage(page, scale);
-    // reset any in-progress lasso on page change
+    // reset in-progress lasso on page change/zoom
     setDragStart(null); setDragNow(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, scale]);
@@ -109,13 +110,15 @@ export default function PdfCanvas({
     ctx.clearRect(0,0,ov.width,ov.height);
 
     if (!ocrSize) return; // cannot scale without OCR dimensions
-    const sx = (ov.width / vp.dpr) / ocrSize.width;   // device→ocr mapping split: ov.width is device px
-    const sy = (ov.height / vp.dpr) / ocrSize.height;
+    const sxCss = vp.wCss / ocrSize.width;
+    const syCss = vp.hCss / ocrSize.height;
+    const sx = sxCss * vp.dpr;  // CSS→device scale
+    const sy = syCss * vp.dpr;
 
     // helper to draw a rect in OCR space
     const draw = (r:Rect, mode:"base"|"sel"|"hl") => {
-      const x = r.x0 * sx * vp.dpr, y = r.y0 * sy * vp.dpr;
-      const w = (r.x1 - r.x0) * sx * vp.dpr, h = (r.y1 - r.y0) * sy * vp.dpr;
+      const x = r.x0 * sx, y = r.y0 * sy;
+      const w = (r.x1 - r.x0) * sx, h = (r.y1 - r.y0) * sy;
       drawStyledRect(ctx, x, y, w, h, mode);
     };
 
@@ -131,7 +134,7 @@ export default function PdfCanvas({
       draw(h, "hl");
     });
 
-    // Live lasso (drag rectangle) — drawn in overlay CSS pixels → convert to device px
+    // Live lasso (ONLY while dragging)
     if (tool === "lasso" && dragStart && dragNow) {
       const x0css = Math.min(dragStart.x, dragNow.x);
       const y0css = Math.min(dragStart.y, dragNow.y);
@@ -140,7 +143,6 @@ export default function PdfCanvas({
       const x = x0css * vp.dpr, y = y0css * vp.dpr;
       const w = (x1css - x0css) * vp.dpr, h = (y1css - y0css) * vp.dpr;
 
-      // dashed purple rubber band
       ctx.save();
       ctx.setLineDash([6, 4]);
       ctx.lineWidth = 2;
@@ -159,10 +161,9 @@ export default function PdfCanvas({
     const pxCss = clientX - r.left;
     const pyCss = clientY - r.top;
 
-    const sx = (vp.wCss) / ocrSize.width;
-    const sy = (vp.hCss) / ocrSize.height;
+    const sx = vp.wCss / ocrSize.width;
+    const sy = vp.hCss / ocrSize.height;
 
-    // Walk from end -> start to prefer later (likely recently added)
     for (let i = boxes.length - 1; i >= 0; i--) {
       const b = boxes[i];
       if (b.page !== page) continue;
@@ -244,10 +245,8 @@ function drawStyledRect(
   x: number, y: number, w: number, h: number,
   mode: "base" | "sel" | "hl"
 ) {
-  // Ensure no stray transform
   ctx.save();
-  ctx.setTransform(1,0,0,1,0,0);
-
+  ctx.setTransform(1,0,0,1,0,0); // ensure no mirroring/scale
   if (mode === "hl") {
     ctx.lineWidth = 3;
     ctx.strokeStyle = "rgba(255,140,0,0.95)";

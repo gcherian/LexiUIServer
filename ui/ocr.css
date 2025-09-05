@@ -206,3 +206,9 @@ input[type="file"] {
   border-radius: 8px;
   background: #fcfcff;
 }
+.pdf-base, .pdf-overlay {
+  transform: none !important;
+}
+.pdf-overlay {
+  z-index: 2;
+}
