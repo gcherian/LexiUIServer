@@ -25,22 +25,29 @@ export default function PdfViewerFS({
   onClose, onChangePage, onZoom, onLasso
 }: Props){
   const pdfRef = useRef<PDFDocumentProxy | null>(null);
-  const baseRef = useRef<HTMLCanvasElement | null>(null);
-  const overlayRef = useRef<HTMLCanvasElement | null>(null);
   const renderTaskRef = useRef<RenderTask | null>(null);
-  const [vp, setVp] = useState<{ width:number; height:number } | null>(null);
-  const [err, setErr] = useState<string|null>(null);
+  const renderIdRef = useRef(0);
   const mounted = useRef(true);
 
-  // inline styles (no external CSS conflicts)
+  // The visible canvas lives inside this wrapper. We replace it on every render.
+  const baseWrapRef = useRef<HTMLDivElement | null>(null);
+  const currentCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  // Overlay is a div (not a canvas) so we never resize a rendering target.
+  const overlayRef = useRef<HTMLDivElement | null>(null);
+
+  const [vp, setVp] = useState<{ width:number; height:number } | null>(null);
+  const [err, setErr] = useState<string|null>(null);
+
+  // ---------- styles ----------
   const modal = { position:"fixed" as const, inset:0, background:"rgba(0,0,0,0.55)", display:"flex", alignItems:"center", justifyContent:"center", zIndex: 9999 };
   const frame = { width:"92vw", height:"88vh", background:"#fff", borderRadius:14, boxShadow:"0 10px 40px rgba(0,0,0,.4)", display:"grid", gridTemplateRows:"56px 1fr", overflow:"hidden" };
   const header = { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"0 14px", borderBottom:"1px solid #e5e5e5", background:"#fafafa" };
-  const stage = { position:"relative" as const, width:"100%", height:"100%", overflow:"auto" };
-  const cBase = { display:"block", margin:"0 auto", background:"#fff" };
-  const cOv = { position:"absolute" as const, inset:0, cursor:"crosshair", display:"block", margin:"0 auto" };
+  const stage  = { position:"relative" as const, width:"100%", height:"100%", overflow:"auto" };
+  const baseWrap = { position:"relative" as const, display:"block", margin:"0 auto", background:"#fff" };
+  const overlayStyle = { position:"absolute" as const, inset:0, cursor:"crosshair" };
 
-  // Cancel any in-flight render safely
+  // ---------- helpers ----------
   const cancelCurrentRender = async () => {
     const t = renderTaskRef.current;
     if (t) {
@@ -50,57 +57,75 @@ export default function PdfViewerFS({
     }
   };
 
-  // Main render function with single-flight and guards
   async function renderPage(pn:number, sc:number){
+    const myId = ++renderIdRef.current;
     try{
       setErr(null);
-      // Ensure canvases exist
-      const base = baseRef.current;
-      const overlay = overlayRef.current;
-      if (!base || !overlay) return;
 
-      // Lazy load / reload PDF when URL changes
+      // lazy load PDF for given URL
       if (!pdfRef.current) {
         pdfRef.current = await getDocument({ url }).promise;
       }
 
-      // Cancel any previous render BEFORE starting a new one
+      // cancel any in-progress task first
       await cancelCurrentRender();
 
-      // Get page + viewport
       const p = await pdfRef.current.getPage(pn);
       const viewport = p.getViewport({ scale: sc });
 
-      // Size the canvases
-      base.width = viewport.width;  base.height = viewport.height;
-      overlay.width = viewport.width; overlay.height = viewport.height;
+      // --- render into a brand-new offscreen canvas ---
+      const work = document.createElement("canvas");
+      work.width = viewport.width;
+      work.height = viewport.height;
+      const wctx = work.getContext("2d");
+      if (!wctx) throw new Error("No 2D context");
 
-      // Kick off render and await it (so we don't overlap)
-      const ctx = base.getContext("2d");
-      if (!ctx) throw new Error("No 2D context");
-      const task = p.render({ canvasContext: ctx, viewport });
+      const task = p.render({ canvasContext: wctx, viewport });
       renderTaskRef.current = task;
-      await task.promise; // if canceled, this throws; caught below
+      await task.promise;                 // if canceled, throws
       renderTaskRef.current = null;
 
+      // if a newer render started, drop this one
+      if (myId !== renderIdRef.current) return;
       if (!mounted.current) return;
+
+      // --- swap the visible canvas node ---
+      const host = baseWrapRef.current;
+      if (!host) return;
+
+      // Remove previous canvas (if any)
+      if (currentCanvasRef.current && currentCanvasRef.current.parentNode === host) {
+        host.removeChild(currentCanvasRef.current);
+      }
+
+      // Insert the freshly rendered canvas
+      host.appendChild(work);
+      currentCanvasRef.current = work;
+
+      // Size overlay to match the new canvas (via CSS; it's absolute over host)
+      // host acts as the sizing box; ensure its size matches the canvas
+      (host as HTMLDivElement).style.width  = `${work.width}px`;
+      (host as HTMLDivElement).style.height = `${work.height}px`;
+
       setVp({ width: viewport.width, height: viewport.height });
     }catch(e:any){
-      if (e?.name === "RenderingCancelledException") return; // expected on cancel
+      if (e?.name === "RenderingCancelledException") return;
       setErr(e?.message || "Failed to render PDF");
-      // Reset vp so overlay doesn't try to use stale dims
       setVp(null);
     }
   }
 
-  // Load/reset when URL changes
+  // Reload on URL change
   useEffect(()=>{
     mounted.current = true;
     (async ()=>{
-      // Tear down old doc and render task
       await cancelCurrentRender();
       pdfRef.current = null;
-      // Kick initial render
+      // clear any existing canvas immediately
+      if (baseWrapRef.current && currentCanvasRef.current) {
+        try { baseWrapRef.current.removeChild(currentCanvasRef.current); } catch {}
+        currentCanvasRef.current = null;
+      }
       await renderPage(page, scale);
     })();
     return () => { mounted.current = false; cancelCurrentRender(); };
@@ -109,12 +134,12 @@ export default function PdfViewerFS({
 
   // Re-render on page/scale change
   useEffect(()=>{
-    if (!pdfRef.current) return; // will render on URL effect
+    if (!pdfRef.current) return; // URL effect will render initial
     renderPage(page, scale);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, scale]);
 
-  // Lasso helpers
+  // Lasso (overlay is a DIV; we compute offsets relative to it)
   const [drag, setDrag] = useState<{x:number;y:number}|null>(null);
   const toOcr = (x:number,y:number) => {
     if (!vp) return { x, y };
@@ -147,11 +172,14 @@ export default function PdfViewerFS({
           {err ? (
             <div style={{padding:16, color:"#b00020", fontFamily:"monospace"}}>{err}</div>
           ) : (
-            <>
-              <canvas ref={baseRef} style={cBase as any}/>
-              <canvas
+            <div style={{position:"relative", width:"100%", height:"100%"}}>
+              {/* Visible canvas container (we swap the child canvas node each render) */}
+              <div ref={baseWrapRef} style={baseWrap as any} />
+
+              {/* Overlay DIV for lasso */}
+              <div
                 ref={overlayRef}
-                style={cOv as any}
+                style={overlayStyle as any}
                 onMouseDown={(e)=>{
                   const el = overlayRef.current; if (!el) return;
                   const r = el.getBoundingClientRect();
@@ -168,9 +196,8 @@ export default function PdfViewerFS({
                   });
                   setDrag(null);
                 }}
-                width={vp?.width||0} height={vp?.height||0}
               />
-            </>
+            </div>
           )}
         </div>
       </div>
