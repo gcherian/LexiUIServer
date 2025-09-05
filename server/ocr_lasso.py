@@ -1,82 +1,99 @@
-# server/lasso_router.py
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query
+from __future__ import annotations
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
-from uuid import uuid4
+from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
+from uuid import uuid4
 import shutil, json, time, difflib
 
+# Imaging / OCR
 import pytesseract
 import pypdfium2 as pdfium
 from PIL import Image, ImageOps
-import numpy as np
 
-# Embeddings (optional; we fail gracefully if the model can't load)
-_EMB_MODEL = None
+# Optional: embeddings for semantic search
+import numpy as np
 try:
     from sentence_transformers import SentenceTransformer
 except Exception:
-    SentenceTransformer = None
+    SentenceTransformer = None  # fail gracefully
 
+# Optional: RDF (tiny FIBO-lite KG)
+try:
+    from rdflib import Graph, Namespace, Literal, RDF, URIRef
+except Exception:
+    Graph = None  # KG becomes a no-op
 
+# -----------------------------------------------------------------------------
+# Globals (initialized once from main.py via init_paths_for_src)
+# -----------------------------------------------------------------------------
 router = APIRouter(prefix="/lasso", tags=["lasso"])
 
-# Set by host app
-BASE: Path = Path(".")
-DATA: Path
-OUT: Path
-PROM: Path
-PUBLIC_BASE: str = "http://localhost:8000"  # used to build absolute URLs
+SRC_DIR: Path = Path(".")
+PROJECT_ROOT: Path = Path(".")
+DATA: Path = Path(".")   # project_root / "data"
+PROM: Path = Path(".")   # project_root / "prom"
+PUBLIC_BASE: str = "http://localhost:8000"
 
-def init_paths(base: Path, public_base: str = "http://localhost:8000"):
-    global BASE, DATA, OUT, PROM, PUBLIC_BASE
-    BASE = base
+_EMB_MODEL = None  # sentence-transformers model (lazy)
+
+def init_paths_for_src(src_dir: Path, public_base: str = "http://localhost:8000"):
+    """
+    Call this ONCE from src/main.py with: init_paths_for_src(Path(__file__).resolve().parent)
+    It sets:
+      PROJECT_ROOT = src_dir.parent
+      DATA = PROJECT_ROOT / "data"
+      PROM = PROJECT_ROOT / "prom"
+    and ensures DATA/PROM exist.
+    """
+    global SRC_DIR, PROJECT_ROOT, DATA, PROM, PUBLIC_BASE, _EMB_MODEL
+    SRC_DIR = src_dir.resolve()
+    PROJECT_ROOT = SRC_DIR.parent
     PUBLIC_BASE = public_base.rstrip("/")
-    DATA = BASE / "data"; DATA.mkdir(exist_ok=True, parents=True)
-    OUT  = BASE / "out" ; OUT.mkdir(exist_ok=True, parents=True)
-    PROM = BASE / "prom"; PROM.mkdir(exist_ok=True, parents=True)
-    global _EMB_MODEL
-    if SentenceTransformer is not None:
+
+    DATA = (PROJECT_ROOT / "data").resolve(); DATA.mkdir(parents=True, exist_ok=True)
+    PROM = (PROJECT_ROOT / "prom").resolve(); PROM.mkdir(parents=True, exist_ok=True)
+
+    # Lazy-load embeddings model if available
+    if SentenceTransformer is not None and _EMB_MODEL is None:
         try:
             _EMB_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
         except Exception:
             _EMB_MODEL = None
 
+    print(f"[ocr_lasso] SRC_DIR={SRC_DIR}")
+    print(f"[ocr_lasso] PROJECT_ROOT={PROJECT_ROOT}")
+    print(f"[ocr_lasso] DATA={DATA}")
+    print(f"[ocr_lasso] PROM={PROM}")
+    print(f"[ocr_lasso] embeddings={'on' if _EMB_MODEL else 'off'}")
 
+# -----------------------------------------------------------------------------
+# File layout helpers: EVERYTHING lives under data/<doc_id>/
+# -----------------------------------------------------------------------------
+def doc_dir(doc_id: str) -> Path:
+    d = DATA / doc_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+def pdf_path(doc_id: str) -> Path:       return doc_dir(doc_id) / "original.pdf"
+def meta_path(doc_id: str) -> Path:      return doc_dir(doc_id) / "meta.json"
+def boxes_path(doc_id: str) -> Path:     return doc_dir(doc_id) / "boxes.json"
 def page_text_path(doc_id: str) -> Path: return doc_dir(doc_id) / "pages.txt"
-def emb_path(doc_id: str) -> Path: return doc_dir(doc_id) / "embeddings.npz"
+def emb_path(doc_id: str) -> Path:       return doc_dir(doc_id) / "embeddings.npz"
+def fields_path(doc_id: str) -> Path:    return doc_dir(doc_id) / "fields.json"
+def kg_path(doc_id: str) -> Path:        return doc_dir(doc_id) / "kg.ttl"
+def audit_log_path(doc_id: str) -> Path: return doc_dir(doc_id) / "audit.log"
 
-def build_embeddings(doc_id: str):
-    """Compute per-page embeddings. No-op if model unavailable."""
-    if _EMB_MODEL is None: return
-    txt_file = page_text_path(doc_id)
-    if not txt_file.exists(): return
-    pages = txt_file.read_text().split("\n\n")
-    embs = _EMB_MODEL.encode(pages, normalize_embeddings=True)
-    np.savez_compressed(emb_path(doc_id), embs=embs)
-
-def semantic_search_pages(doc_id: str, query: str, topk: int = 5):
-    if _EMB_MODEL is None or not emb_path(doc_id).exists():
-        return []
-    data = np.load(emb_path(doc_id))
-    embs = data["embs"]  # [P, D]
-    q = _EMB_MODEL.encode([query], normalize_embeddings=True)[0]  # [D]
-    sims = (embs @ q)    # cosine since normalized
-    idx = np.argsort(-sims)[:topk]
-    return [(int(i+1), float(sims[i])) for i in idx]
-
-
-
-# ---------- Models ----------
+# -----------------------------------------------------------------------------
+# Models
+# -----------------------------------------------------------------------------
 class OCRParams(BaseModel):
-    dpi: int = 220
+    dpi: int = 260
     psm: int = 6
     oem: int = 1
     lang: str = "eng"
     binarize: bool = True
-    deskew: bool = False
-    dilate: int = 0
-    erode: int = 0
 
 class Rect(BaseModel):
     x0: float; y0: float; x1: float; y1: float
@@ -98,8 +115,8 @@ class MetaResp(BaseModel):
 class SearchReq(BaseModel):
     doc_id: str; query: str; topk: int = 20
 
-class BoxesSaveReq(BaseModel):
-    boxes: List[Box]
+class LassoReq(Rect):
+    doc_id: str; page: int
 
 class PromField(BaseModel):
     key: str
@@ -115,9 +132,9 @@ class PromCatalog(BaseModel):
 
 class FieldState(BaseModel):
     key: str
-    value: Optional[Any] = None
-    bbox: Optional[Dict[str, Any]] = None
-    source: str = "user"
+    value: Optional[str] = None
+    bbox: Optional[Dict[str, Any]] = None  # {page,x0,y0,x1,y1}
+    source: str = "user"  # ecm|ocr|user|llm
     confidence: float = 0.0
 
 class FieldDocState(BaseModel):
@@ -133,27 +150,15 @@ class ECMExtractReq(BaseModel):
 class SetDocTypeReq(BaseModel):
     doctype: str
 
-class SetDocTypeShort(BaseModel):  # convenience
-    doc_id: str
-    doctype: str
-
 class BindReq(BaseModel):
     doc_id: str
     page: int
     rect: Rect
     key: str
 
-# ---------- Paths ----------
-def doc_dir(doc_id: str) -> Path:
-    d = DATA / doc_id; d.mkdir(parents=True, exist_ok=True); return d
-
-def pdf_path(doc_id: str) -> Path: return doc_dir(doc_id) / "original.pdf"
-def meta_path(doc_id: str) -> Path: return doc_dir(doc_id) / "meta.json"
-def boxes_path(doc_id: str) -> Path: return doc_dir(doc_id) / "boxes.json"
-def field_state_path(doc_id: str) -> Path: return doc_dir(doc_id) / "fields.json"
-def prom_path(doctype: str) -> Path: return PROM / f"{doctype}.json"
-
-# ---------- OCR helpers ----------
+# -----------------------------------------------------------------------------
+# OCR helpers
+# -----------------------------------------------------------------------------
 def render_pdf_pages(pdf_file: Path, dpi: int):
     pdf = pdfium.PdfDocument(str(pdf_file))
     for i in range(len(pdf)):
@@ -171,190 +176,189 @@ def preprocess_pil(img: Image.Image, params: OCRParams) -> Image.Image:
 
 def tesseract_image_to_data(img: Image.Image, params: OCRParams):
     cfg = f"--oem {params.oem} --psm {params.psm}"
-    return pytesseract.image_to_data(
-        img, lang=params.lang, config=cfg, output_type=pytesseract.Output.DICT
-    )
-
+    return pytesseract.image_to_data(img, lang=params.lang, config=cfg, output_type=pytesseract.Output.DICT)
 
 def run_full_ocr(doc_id: str, params: OCRParams) -> MetaResp:
     pdf = pdf_path(doc_id)
     all_boxes: List[Dict[str, Any]] = []
     pages_meta: List[Dict[str, float]] = []
-    all_page_texts: List[str] = []   # <— collect per-page text for embeddings
+    all_page_texts: List[str] = []
 
     for page_no, pil, w, h in render_pdf_pages(pdf, params.dpi):
         img = preprocess_pil(pil, params)
         d = tesseract_image_to_data(img, params)
-
-        # accumulate tokens and boxes
         tokens_this_page: List[str] = []
         for i in range(len(d["text"])):
             txt = (d["text"][i] or "").strip()
-            if not txt:
-                continue
+            if not txt: continue
             x, y, ww, hh = d["left"][i], d["top"][i], d["width"][i], d["height"][i]
-            all_boxes.append({
-                "page": page_no,
-                "x0": float(x),
-                "y0": float(y),
-                "x1": float(x + ww),
-                "y1": float(y + hh),
-                "text": txt
-            })
+            all_boxes.append({"page":page_no,"x0":float(x),"y0":float(y),"x1":float(x+ww),"y1":float(y+hh),"text":txt})
             tokens_this_page.append(txt)
-
-        # store page meta and text
-        pages_meta.append({"page": page_no, "width": float(w), "height": float(h)})
+        pages_meta.append({"page":page_no,"width":float(w),"height":float(h)})
         all_page_texts.append(" ".join(tokens_this_page))
 
-    # persist meta and boxes (unchanged)
     meta_path(doc_id).write_text(json.dumps({"pages": pages_meta, "params": params.model_dump()}, indent=2))
     boxes_path(doc_id).write_text(json.dumps(all_boxes))
-
-    # NEW: persist page texts and build embeddings
     page_text_path(doc_id).write_text("\n\n".join(all_page_texts))
     build_embeddings(doc_id)
-
     return MetaResp(pages=pages_meta)
 
-def load_boxes(doc_id: str) -> List[Box]:
-    p = boxes_path(doc_id)
-    if not p.exists(): return []
-    return [Box(**b) for b in json.loads(p.read_text())]
-
+# -----------------------------------------------------------------------------
+# Embeddings / semantic search (optional)
+# -----------------------------------------------------------------------------
+def build_embeddings(doc_id: str):
+    if _EMB_MODEL is None:
+        return
+    txt_file = page_text_path(doc_id)
+    if not txt_file.exists():
+        return
+    pages = txt_file.read_text().split("\n\n")
+    embs = _EMB_MODEL.encode(pages, normalize_embeddings=True)
+    np.savez_compressed(emb_path(doc_id), embs=embs)
 
 def semantic_search_pages(doc_id: str, query: str, topk: int = 5):
     if _EMB_MODEL is None or not emb_path(doc_id).exists():
         return []
     data = np.load(emb_path(doc_id))
-    embs = data["embs"]  # shape [num_pages, dim]
+    embs = data["embs"]
     q = _EMB_MODEL.encode([query], normalize_embeddings=True)[0]
-    sims = embs @ q  # cosine (because normalized)
+    sims = embs @ q
     idx = np.argsort(-sims)[:topk]
-    return [(int(i + 1), float(sims[i])) for i in idx]
+    return [(int(i+1), float(sims[i])) for i in idx]
 
-@router.get("/semantic_search")
-async def semantic_search_api(doc_id: str = Query(...), q: str = Query(...), topk: int = 5):
-    res = semantic_search_pages(doc_id, q, topk)
-    return {"results": [{"page": p, "score": s} for p, s in res]}
+# -----------------------------------------------------------------------------
+# Tiny FIBO-lite KG (optional)
+# -----------------------------------------------------------------------------
+FIBO = None
+EDIP = None
+if Graph is not None:
+    FIBO = Namespace("https://spec.edmcouncil.org/fibo/ontology/")
+    EDIP = Namespace("https://example.com/edip/")
 
-# ---------- Field-state helpers ----------
-def ensure_field_state(doc_id: str, doctype: str) -> FieldDocState:
-    fp = field_state_path(doc_id)
-    if fp.exists():
-        return FieldDocState(**json.loads(fp.read_text()))
-    # auto-init from PROM
-    pp = prom_path(doctype)
-    if not pp.exists():
-        raise HTTPException(404, f"PROM catalog not found for doctype '{doctype}'")
-    prom = json.loads(pp.read_text())
-    fields = [FieldState(key=f["key"]) for f in prom["fields"]]
-    state = FieldDocState(
-        doc_id=doc_id, doctype=doctype, fields=fields,
-        audit=[{"ts": int(time.time()), "event":"auto_init", "doctype": doctype}]
-    )
-    fp.write_text(state.model_dump_json(indent=2))
-    return state
+def build_kg_from_fields(doc_id: str, doctype: Optional[str]):
+    if Graph is None:
+        return
+    g = Graph()
+    g.bind("fibo", FIBO); g.bind("edip", EDIP)
+    doc_uri = URIRef(f"{EDIP}doc/{doc_id}")
+    g.add((doc_uri, RDF.type, EDIP.Document))
+    fp = fields_path(doc_id)
+    if not fp.exists():
+        g.add((doc_uri, EDIP.status, Literal("no_fields")))
+        g.serialize(destination=str(kg_path(doc_id)), format="turtle"); return
+    state = json.loads(fp.read_text())
+    g.add((doc_uri, EDIP.doctype, Literal(state.get("doctype","unknown"))))
+    # Simple: attach all keys/values as literals
+    for f in state.get("fields", []):
+        key, val = f.get("key"), f.get("value")
+        if key and val:
+            g.add((doc_uri, URIRef(f"{EDIP}{key}"), Literal(val)))
+    g.serialize(destination=str(kg_path(doc_id)), format="turtle")
 
-# ---------- Endpoints ----------
+# -----------------------------------------------------------------------------
+# PROM helpers
+# -----------------------------------------------------------------------------
+def assert_prom_ready():
+    if not PROM.exists():
+        raise HTTPException(404, f"PROM directory not found at {PROM}")
+
+# -----------------------------------------------------------------------------
+# Endpoints
+# -----------------------------------------------------------------------------
 @router.get("/health")
-def health(): return {"ok": True, "svc": "lasso-router"}
+def health():
+    return {"ok": True, "svc": "ocr_lasso", "embeddings": bool(_EMB_MODEL), "DATA": str(DATA)}
 
+@router.get("/debug/paths")
+def debug_paths(request: Request):
+    return {
+        "src_dir": str(SRC_DIR),
+        "project_root": str(PROJECT_ROOT),
+        "data": str(DATA),
+        "prom": str(PROM),
+        "example_pdf_url": f"{str(request.base_url).rstrip('/')}/data/DEMO/original.pdf"
+    }
+
+# ---- Upload ----
 @router.post("/upload", response_model=UploadResp)
-async def upload(pdf: UploadFile = File(...), backend: str = Form("tesseract")):
+async def upload(request: Request, pdf: UploadFile = File(...), backend: str = Form("tesseract")):
     doc_id = uuid4().hex[:12]
-    p = pdf_path(doc_id); p.parent.mkdir(parents=True, exist_ok=True)
+    p = pdf_path(doc_id)
     with p.open("wb") as f: shutil.copyfileobj(pdf.file, f)
+    # OCR (writes boxes/meta/pages/embeddings)
     params = OCRParams()
     run_full_ocr(doc_id, params)
     pages = json.loads(meta_path(doc_id).read_text())["pages"]
-    # return ABSOLUTE URL so PDF.js always loads
+    base = str(request.base_url).rstrip("/")
     return UploadResp(
         doc_id=doc_id,
-        annotated_tokens_url=f"{PUBLIC_BASE}/data/{doc_id}/original.pdf",
+        annotated_tokens_url=f"{base}/data/{doc_id}/original.pdf",
         pages=len(pages)
     )
 
+# ---- Static-ish helpers for main.py mount (served by main) ----
+# (No endpoint needed here; main.py will mount DATA at /data)
+
+# ---- Meta / Boxes ----
 @router.get("/doc/{doc_id}/meta", response_model=MetaResp)
 async def get_meta(doc_id: str):
-    m = meta_path(doc_id)
-    if not m.exists(): raise HTTPException(404, "Meta not found")
-    return MetaResp(pages=json.loads(m.read_text())["pages"])
-
-@router.post("/doc/{doc_id}/rebuild", response_model=MetaResp)
-async def rebuild(doc_id: str, params: OCRParams):
-    if not pdf_path(doc_id).exists(): raise HTTPException(404, "Doc not found")
-    return run_full_ocr(doc_id, params)
+    mp = meta_path(doc_id)
+    if not mp.exists(): raise HTTPException(404, "Meta not found")
+    return MetaResp(pages=json.loads(mp.read_text())["pages"])
 
 @router.get("/doc/{doc_id}/boxes", response_model=List[Box])
-async def get_boxes(doc_id: str): return load_boxes(doc_id)
+async def get_boxes(doc_id: str):
+    bp = boxes_path(doc_id)
+    if not bp.exists(): return []
+    return [Box(**b) for b in json.loads(bp.read_text())]
 
-@router.put("/doc/{doc_id}/boxes")
-async def put_boxes(doc_id: str, req: BoxesSaveReq):
-    boxes_path(doc_id).write_text(json.dumps([b.model_dump() for b in req.boxes], indent=2))
-    return {"ok": True, "count": len(req.boxes)}
-
+# ---- Token search (fuzzy) ----
 @router.post("/search")
-async def search(req: SearchReq):
-    tokens = load_boxes(req.doc_id)
+async def token_search(req: SearchReq):
+    bp = boxes_path(req.doc_id)
+    if not bp.exists(): return {"matches": []}
+    tokens = json.loads(bp.read_text())
     q = req.query.strip().lower()
     if not q: return {"matches": []}
-    matches = []
+    hits = []
     for t in tokens:
-        txt = (t.text or "").lower() if t.text else ""
+        txt = (t.get("text") or "").lower()
         if not txt: continue
         score = difflib.SequenceMatcher(None, q, txt).ratio()
         if score > 0.45:
-            matches.append({
-                "page": t.page,
-                "bbox": {"x0": t.x0, "y0": t.y0, "x1": t.x1, "y1": t.y1},
-                "text": t.text,
-                "score": round(score, 3),
+            hits.append({
+                "page": int(t["page"]),
+                "bbox": {k: float(t[k]) for k in ("x0","y0","x1","y1")},
+                "text": t.get("text",""),
+                "score": round(score,3),
             })
-    matches.sort(key=lambda m: m["score"], reverse=True)
-    return {"matches": matches[:req.topk]}
+    hits.sort(key=lambda m: m["score"], reverse=True)
+    return {"matches": hits[:req.topk]}
 
+# ---- Semantic search (optional) ----
+@router.get("/semantic_search")
+async def semantic_search(doc_id: str = Query(...), q: str = Query(...), topk: int = 5):
+    res = semantic_search_pages(doc_id, q, topk)
+    return {"results": [{"page": p, "score": s} for p, s in res]}
 
-# If not already defined in your file:
-class LassoReq(BaseModel):
-    doc_id: str
-    page: int
-    x0: float
-    y0: float
-    x1: float
-    y1: float
-
+# ---- Robust lasso OCR ----
 @router.post("/lasso")
 async def lasso_crop(req: LassoReq):
-    """
-    Robust lasso OCR:
-    - soft grayscale (no hard binarization)
-    - safe padding around crop
-    - upscale small regions (2–3x)
-    - try multiple PSMs (6,7,11) and pick best
-    - fallback: inflate region and retry if OCR is too short
-    Returns: {"text": "..."}  (UI depends on this exact shape)
-    """
-    # ---- load page + meta ----
-    m = meta_path(req.doc_id)
-    if not m.exists():
-        raise HTTPException(404, "Meta missing")
-    meta = json.loads(m.read_text())
+    mp = meta_path(req.doc_id)
+    if not mp.exists(): raise HTTPException(404, "Meta missing")
+    meta = json.loads(mp.read_text())
     dpi = meta.get("params", {}).get("dpi", 260)
 
-    # render page at OCR dpi
     pdf = pdfium.PdfDocument(str(pdf_path(req.doc_id)))
     if req.page < 1 or req.page > len(pdf):
         raise HTTPException(400, f"Page out of range: {req.page}")
     pil = pdf[req.page - 1].render(scale=(dpi / 72)).to_pil()
 
-    # soft grayscale (avoid hard thresholding which clips thin glyphs)
     def prep(img: Image.Image) -> Image.Image:
         return ImageOps.autocontrast(img.convert("L"))
 
     img = prep(pil)
 
-    # normalize coordinates + base padding
     base_pad = 6
     x0, y0, x1, y1 = float(req.x0), float(req.y0), float(req.x1), float(req.y1)
     if x0 > x1: x0, x1 = x1, x0
@@ -362,10 +366,7 @@ async def lasso_crop(req: LassoReq):
     x0, y0 = max(0, int(x0 - base_pad)), max(0, int(y0 - base_pad))
     x1, y1 = min(img.width - 1, int(x1 + base_pad)), min(img.height - 1, int(y1 + base_pad))
 
-    # crop
     crop = img.crop((x0, y0, x1, y1))
-
-    # upscale small crops (helps Tesseract a LOT)
     cw, ch = crop.size
     if cw < 140 or ch < 40:
         scale = 3 if max(cw, ch) < 60 else 2
@@ -374,27 +375,19 @@ async def lasso_crop(req: LassoReq):
     def ocr_try(psm: int, im: Image.Image) -> str:
         cfg = f"--oem 1 --psm {psm} -c preserve_interword_spaces=1"
         return pytesseract.image_to_string(
-            im,
-            lang=meta.get("params", {}).get("lang", "eng"),
-            config=cfg
+            im, lang=meta.get("params",{}).get("lang","eng"), config=cfg
         ).strip()
 
-    # score candidates: prefer longer text, reward spaces, penalize non-printables
-    def score_text(s: str):
-        return (len(s), s.count(" "), -sum(1 for ch in s if not ch.isprintable()))
+    def score_text(s: str): return (len(s), s.count(" "), -sum(1 for ch in s if not ch.isprintable()))
 
-    # first pass
     cands = [(score_text(t := ocr_try(p, crop)), t) for p in (6, 7, 11)]
     cands.sort(reverse=True)
     best = cands[0][1]
 
-    # fallback: if too short, inflate and retry once
     if len(best) <= 2:
         inflate = 18
-        X0 = max(0, x0 - inflate)
-        Y0 = max(0, y0 - inflate)
-        X1 = min(img.width - 1, x1 + inflate)
-        Y1 = min(img.height - 1, y1 + inflate)
+        X0 = max(0, x0 - inflate); Y0 = max(0, y0 - inflate)
+        X1 = min(img.width - 1, x1 + inflate); Y1 = min(img.height - 1, y1 + inflate)
         bigger = img.crop((X0, Y0, X1, Y1))
         bw, bh = bigger.size
         if bw < 220 or bh < 70:
@@ -406,20 +399,10 @@ async def lasso_crop(req: LassoReq):
 
     return {"text": best}
 
-@router.post("/audit")
-async def audit(payload: Dict[str, Any]):
-    with (OUT / "audit.log").open("a") as f: f.write(json.dumps(payload) + "\n")
-    return {"ok": True}
-
-# ---- PROM / Fields / ECM ----
-@router.get("/prom/{doctype}", response_model=PromCatalog)
-async def get_prom(doctype: str):
-    p = prom_path(doctype)
-    if not p.exists(): raise HTTPException(404, "PROM catalog not found")
-    return PromCatalog(**json.loads(p.read_text()))
-
+# ---- PROM ----
 @router.get("/prom")
-async def list_proms():
+async def prom_list():
+    assert_prom_ready()
     items = []
     for p in PROM.glob("*.json"):
         try:
@@ -429,101 +412,110 @@ async def list_proms():
             pass
     return {"doctypes": items}
 
+@router.get("/prom/{doctype}", response_model=PromCatalog)
+async def prom_get(doctype: str):
+    assert_prom_ready()
+    p = PROM / f"{doctype}.json"
+    if not p.exists():
+        raise HTTPException(404, f"PROM catalog not found for '{doctype}'")
+    return PromCatalog(**json.loads(p.read_text()))
+
+# ---- Fields / ECM / Bind ----
+def ensure_field_state(doc_id: str, doctype: str) -> FieldDocState:
+    fp = fields_path(doc_id)
+    if fp.exists():
+        return FieldDocState(**json.loads(fp.read_text()))
+    # seed from PROM
+    pp = PROM / f"{doctype}.json"
+    if not pp.exists():
+        raise HTTPException(404, f"PROM not found for '{doctype}'")
+    prom = json.loads(pp.read_text())
+    fields = [FieldState(key=f["key"]) for f in prom.get("fields",[])]
+    state = FieldDocState(doc_id=doc_id, doctype=doctype, fields=fields, audit=[{"ts":int(time.time()),"event":"init","doctype":doctype}])
+    fp.write_text(state.model_dump_json(indent=2))
+    return state
+
 @router.post("/doc/{doc_id}/doctype")
 async def set_doctype(doc_id: str, req: SetDocTypeReq):
-    ensure_field_state(doc_id, req.doctype)  # creates if missing
-    return {"ok": True}
-
-@router.post("/doc")  # convenience: accepts {doc_id, doctype}
-async def set_doctype_short(req: SetDocTypeShort):
-    ensure_field_state(req.doc_id, req.doctype)
-    return {"ok": True}
+    st = ensure_field_state(doc_id, req.doctype)
+    build_kg_from_fields(doc_id, req.doctype)
+    return {"ok": True, "doctype": st.doctype}
 
 @router.get("/doc/{doc_id}/fields", response_model=FieldDocState)
 async def get_fields(doc_id: str):
-    p = field_state_path(doc_id)
-    if not p.exists(): raise HTTPException(404, "Fields not initialized")
-    return FieldDocState(**json.loads(p.read_text()))
+    fp = fields_path(doc_id)
+    if not fp.exists(): raise HTTPException(404, "Fields not initialized")
+    return FieldDocState(**json.loads(fp.read_text()))
 
 @router.put("/doc/{doc_id}/fields", response_model=FieldDocState)
 async def put_fields(doc_id: str, state: FieldDocState):
-    field_state_path(doc_id).write_text(state.model_dump_json(indent=2))
+    fields_path(doc_id).write_text(state.model_dump_json(indent=2))
+    build_kg_from_fields(doc_id, state.doctype)
     return state
 
 @router.post("/ecm/extract", response_model=FieldDocState)
 async def ecm_extract(req: ECMExtractReq):
-    # auto-init if missing
     state = ensure_field_state(req.doc_id, req.doctype)
-    ecm_fields = await _mock_ecm(req.doc_id, req.doctype)
-    tokens = load_boxes(req.doc_id)
-
-    def infer_bbox(val: str):
-        if not val or not tokens: return None
-        v = str(val).lower()
-        best, best_s = None, 0.0
-        for t in tokens:
-            txt = (t.text or "").lower() if t.text else ""
-            if not txt: continue
-            s = difflib.SequenceMatcher(None, v, txt).ratio()
-            if s > best_s: best, best_s = t, s
-        if best and best_s >= 0.55:
-            return {"page": best.page, "x0": best.x0, "y0": best.y0, "x1": best.x1, "y1": best.y1}
-        return None
-
-    by_key = {f.key: f for f in state.fields}
+    # mock ECM payload (replace with your ECM call)
+    ecm_fields = [
+        {"key":"customer_name","value":"Initech LLC","confidence":0.92},
+        {"key":"city","value":"Chennai","confidence":0.75},
+    ] if req.doctype != "invoice" else [
+        {"key":"partner_name","value":"Acme Supply Co.","confidence":0.89},
+        {"key":"invoice_number","value":"INV-2025-0905-01","confidence":0.94},
+        {"key":"city","value":"Bangalore","confidence":0.70},
+    ]
+    # merge
+    m = {f.key:f for f in state.fields}
     for ef in ecm_fields:
-        key = ef.get("key"); 
-        if not key: continue
-        fs = by_key.get(key) or FieldState(key=key); by_key[key] = fs
-        fs.value = ef.get("value")
-        fs.confidence = float(ef.get("confidence", 0.0))
-        fs.source = "ecm"
-        fs.bbox = ef.get("bbox") or infer_bbox(fs.value)
-
-    state.fields = list(by_key.values())
-    state.audit.append({"ts": int(time.time()), "event":"ecm_merge", "count": len(ecm_fields)})
-    field_state_path(req.doc_id).write_text(state.model_dump_json(indent=2))
+        k = ef["key"]; v = ef.get("value")
+        fs = m.get(k) or FieldState(key=k)
+        fs.value = v; fs.source = "ecm"; fs.confidence = float(ef.get("confidence",0.0))
+        m[k] = fs
+    state.fields = list(m.values())
+    state.audit.append({"ts":int(time.time()),"event":"ecm_merge","count":len(ecm_fields)})
+    fields_path(req.doc_id).write_text(state.model_dump_json(indent=2))
+    build_kg_from_fields(req.doc_id, state.doctype)
     return state
 
 @router.post("/doc/{doc_id}/bind", response_model=FieldDocState)
 async def bind_field(doc_id: str, req: BindReq):
-    p = field_state_path(doc_id)
-    if not p.exists(): raise HTTPException(404, "Fields not initialized")
-    state = FieldDocState(**json.loads(p.read_text()))
+    fp = fields_path(doc_id)
+    if not fp.exists(): raise HTTPException(404, "Fields not initialized")
+    state = FieldDocState(**json.loads(fp.read_text()))
     target = next((f for f in state.fields if f.key == req.key), None)
     if not target: raise HTTPException(404, f"Field '{req.key}' not found")
 
     meta = json.loads(meta_path(doc_id).read_text())
-    dpi = meta.get("params", {}).get("dpi", 220)
+    dpi = meta.get("params", {}).get("dpi", 260)
     pil = pdfium.PdfDocument(str(pdf_path(doc_id)))[req.page-1].render(scale=(dpi/72)).to_pil()
-    img = preprocess_pil(pil, OCRParams(**meta.get("params", {})))
+    img = ImageOps.autocontrast(pil.convert("L"))
     x0,y0,x1,y1 = map(int,[req.rect.x0,req.rect.y0,req.rect.x1,req.rect.y1])
-    x0,y0 = max(0,x0), max(0,y0)
-    x1,y1 = min(img.width-1,x1), min(img.height-1,y1)
+    if x0 > x1: x0,x1 = x1,x0
+    if y0 > y1: y0,y1 = y1,y0
+    pad = 6
+    x0,y0 = max(0,x0-pad), max(0,y0-pad)
+    x1,y1 = min(img.width-1,x1+pad), min(img.height-1,y1+pad)
     crop = img.crop((x0,y0,x1,y1))
-    text = pytesseract.image_to_string(crop, lang=meta.get("params",{}).get("lang","eng"), config="--oem 1 --psm 6").strip()
-
-    target.value = text
-    target.source = "ocr"
-    target.confidence = 0.80 if text else 0.0
+    # upscale small crops
+    if crop.width < 140 or crop.height < 40:
+        scale = 3 if max(crop.width,crop.height) < 60 else 2
+        crop = crop.resize((crop.width*scale, crop.height*scale), Image.BICUBIC)
+    # OCR
+    def ocr(psm:int): 
+        return pytesseract.image_to_string(crop, lang=meta.get("params",{}).get("lang","eng"), config=f"--oem 1 --psm {psm} -c preserve_interword_spaces=1").strip()
+    text = max((ocr(p) for p in (6,7,11)), key=lambda s: (len(s), s.count(" ")), default="")
+    target.value = text; target.source = "ocr"; target.confidence = 0.8 if text else 0.0
     target.bbox = {"page": req.page, "x0": req.rect.x0, "y0": req.rect.y0, "x1": req.rect.x1, "y1": req.rect.y1}
 
-    state.audit.append({"ts": int(time.time()), "event":"bind", "key": req.key, "value": text})
-    field_state_path(doc_id).write_text(state.model_dump_json(indent=2))
+    state.audit.append({"ts":int(time.time()),"event":"bind","key":req.key,"value":text})
+    fields_path(doc_id).write_text(state.model_dump_json(indent=2))
+    build_kg_from_fields(doc_id, state.doctype)
     return state
 
-# ---- Mock ECM ----
-async def _mock_ecm(doc_id: str, doctype: str):
-    if doctype == "invoice":
-        return [
-            {"key":"partner_name", "value":"Acme Supply Co.", "confidence":0.89, "bbox": None},
-            {"key":"invoice_number", "value":"INV-2025-0904-17", "confidence":0.94, "bbox": None},
-            {"key":"city", "value":"Bangalore", "confidence":0.72, "bbox": None},
-        ]
-    else:
-        return [
-            {"key":"customer_name", "value":"Initech LLC", "confidence":0.92, "bbox": None},
-            {"key":"ownership_type", "value":"Leased", "confidence":0.88, "bbox": None},
-            {"key":"city", "value":"Chennai", "confidence":0.72, "bbox": None},
-        ]
-
+# ---- KG endpoints (optional) ----
+@router.get("/doc/{doc_id}/kg")
+async def get_kg(doc_id: str):
+    if not kg_path(doc_id).exists():
+        build_kg_from_fields(doc_id, None)
+    return {"ttl_path": f"/data/{doc_id}/kg.ttl"}
