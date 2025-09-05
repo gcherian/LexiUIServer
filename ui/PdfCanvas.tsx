@@ -13,14 +13,23 @@ export type Box  = Rect & { page: number; id?: string; label?: string; text?: st
 type Props = {
   url?: string;
   page: number;
-  boxes?: Box[];                         // base layer (blue)
-  highlights?: Box[];                    // search results (orange)
-  selected?: number[];                   // indices referring to boxes[]
+
+  // Layers
+  ocrBoxes?: Box[];              // all OCR tokens (light blue)
+  highlightBoxes?: Box[];        // search hits (orange)
+  boundBoxes?: Box[];            // user-bound edits (green)
+
+  // Selection/linking
+  selectedBoxIds?: string[];     // ids that should be emphasized (purple)
+  onSelectBox?: (boxId: string, boxIndex: number) => void;
+
+  // Geometry
   ocrSize?: { width: number; height: number };
-  scale?: number;                        // UI zoom (1.25 etc.)
+  scale?: number;
+
+  // Tools
   tool?: "select" | "lasso";
-  onLasso?: (rect: Rect) => void;        // OCR space
-  onSelectBox?: (boxIndex: number) => void;
+  onLasso?: (rect: Rect) => void;  // OCR-space rect
 };
 
 type VpInfo = { wCss:number; hCss:number; dpr:number };
@@ -28,14 +37,15 @@ type VpInfo = { wCss:number; hCss:number; dpr:number };
 export default function PdfCanvas({
   url,
   page,
-  boxes = [],
-  highlights = [],
-  selected = [],
+  ocrBoxes = [],
+  highlightBoxes = [],
+  boundBoxes = [],
+  selectedBoxIds = [],
+  onSelectBox,
   ocrSize,
   scale = 1.25,
   tool = "select",
   onLasso,
-  onSelectBox,
 }: Props) {
   const pdfRef = useRef<any>(null);
   const [vp, setVp] = useState<VpInfo | null>(null);
@@ -46,95 +56,105 @@ export default function PdfCanvas({
   const [dragStart, setDragStart] = useState<{ x:number; y:number } | null>(null);
   const [dragNow, setDragNow]     = useState<{ x:number; y:number } | null>(null);
 
-  // ---------- Render PDF with DPR-aware sizing ----------
+  // ---------- Render PDF via offscreen buffer (prevents flip) ----------
   async function renderPage(pnum:number, zoom:number){
     if (!pdfRef.current || !baseCanvas.current) return;
     const dpr = Math.max(1, window.devicePixelRatio || 1);
 
-    const p = await pdfRef.current.getPage(pnum);
-    // render at device pixels
-    const viewport = p.getViewport({ scale: zoom * dpr });
+    const pageObj = await pdfRef.current.getPage(pnum);
+    const viewport = pageObj.getViewport({ scale: zoom * dpr, rotation: 0, dontFlip: true });
 
+    // Offscreen canvas
+    const work = document.createElement("canvas");
+    work.width  = Math.floor(viewport.width);
+    work.height = Math.floor(viewport.height);
+    const wctx = work.getContext("2d"); if (!wctx) return;
+    wctx.setTransform(1,0,0,1,0,0);
+    wctx.clearRect(0,0,work.width,work.height);
+
+    await pageObj.render({ canvasContext: wctx, viewport }).promise;
+
+    // Blit to visible canvas
     const c = baseCanvas.current!;
-    // set backing store size (device pixels)
-    c.width  = Math.floor(viewport.width);
-    c.height = Math.floor(viewport.height);
-    // set CSS display size (CSS pixels)
-    c.style.width  = `${Math.floor(viewport.width / dpr)}px`;
-    c.style.height = `${Math.floor(viewport.height / dpr)}px`;
-
+    c.width  = work.width;
+    c.height = work.height;
+    c.style.width  = `${Math.floor(work.width / dpr)}px`;
+    c.style.height = `${Math.floor(work.height / dpr)}px`;
     const ctx = c.getContext("2d"); if (!ctx) return;
-    // prevent mirrored/flipped PDF and stale transforms
     ctx.setTransform(1,0,0,1,0,0);
     ctx.clearRect(0,0,c.width,c.height);
+    ctx.drawImage(work, 0, 0);
 
-    await p.render({ canvasContext: ctx, viewport }).promise;
-
-    // sync overlay canvas size/transform
+    // Sync overlay
     const ov = overlay.current!;
     ov.width  = c.width;
     ov.height = c.height;
     ov.style.width  = c.style.width;
     ov.style.height = c.style.height;
 
-    setVp({ wCss: Math.floor(viewport.width / dpr), hCss: Math.floor(viewport.height / dpr), dpr });
+    setVp({ wCss: Math.floor(work.width / dpr), hCss: Math.floor(work.height / dpr), dpr });
   }
 
-  // ---------- Load PDF once ----------
+  // Load PDF once
   useEffect(() => {
     if (!url) return;
     (async () => {
-      pdfRef.current = await getDocument(url).promise;
+      pdfRef.current = await getDocument({ url }).promise;
       await renderPage(page, scale);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url]);
 
-  // ---------- Re-render on page / scale ----------
+  // Re-render on page / scale
   useEffect(() => {
     if (!pdfRef.current) return;
     renderPage(page, scale);
-    // reset in-progress lasso on page change/zoom
     setDragStart(null); setDragNow(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, scale]);
 
-  // ---------- Draw overlays (boxes + highlights + live lasso) ----------
+  // Draw overlays (order matters)
   useEffect(() => {
     if (!vp || !overlay.current) return;
     const ov = overlay.current;
     const ctx = ov.getContext("2d"); if (!ctx) return;
 
-    // overlay uses device pixels internally
     ctx.setTransform(1,0,0,1,0,0);
     ctx.clearRect(0,0,ov.width,ov.height);
 
-    if (!ocrSize) return; // cannot scale without OCR dimensions
+    if (!ocrSize) return;
     const sxCss = vp.wCss / ocrSize.width;
     const syCss = vp.hCss / ocrSize.height;
     const sx = sxCss * vp.dpr;  // CSS→device scale
     const sy = syCss * vp.dpr;
 
-    // helper to draw a rect in OCR space
-    const draw = (r:Rect, mode:"base"|"sel"|"hl") => {
+    const draw = (r:Rect, mode:"ocr"|"hl"|"bound"|"selected") => {
       const x = r.x0 * sx, y = r.y0 * sy;
       const w = (r.x1 - r.x0) * sx, h = (r.y1 - r.y0) * sy;
       drawStyledRect(ctx, x, y, w, h, mode);
     };
 
-    // Base boxes (blue)
-    boxes.forEach((b, i) => {
-      if (b.page !== page) return;
-      draw(b, selected.includes(i) ? "sel" : "base");
-    });
+    // 1) All OCR tokens (light blue)
+    ocrBoxes.forEach((b) => { if (b.page === page) draw(b, "ocr"); });
 
-    // Highlights (orange), drawn on top
-    highlights.forEach((h) => {
-      if (h.page !== page) return;
-      draw(h, "hl");
-    });
+    // 2) Highlights (orange)
+    highlightBoxes.forEach((h) => { if (h.page === page) draw(h, "hl"); });
 
-    // Live lasso (ONLY while dragging)
+    // 3) Bound/edited (green)
+    boundBoxes.forEach((g) => { if (g.page === page) draw(g, "bound"); });
+
+    // 4) Selected (purple, thick) — emphasize on top
+    if (selectedBoxIds.length) {
+      const wanted = new Set(selectedBoxIds);
+      const candidates = [...ocrBoxes, ...highlightBoxes, ...boundBoxes];
+      candidates.forEach((b) => {
+        if (b.page !== page) return;
+        if (!b.id) return;
+        if (wanted.has(b.id)) draw(b, "selected");
+      });
+    }
+
+    // Live lasso (only while dragging)
     if (tool === "lasso" && dragStart && dragNow) {
       const x0css = Math.min(dragStart.x, dragNow.x);
       const y0css = Math.min(dragStart.y, dragNow.y);
@@ -152,10 +172,10 @@ export default function PdfCanvas({
       ctx.strokeRect(x, y, w, h);
       ctx.restore();
     }
-  }, [boxes, highlights, selected, page, vp, ocrSize, tool, dragStart, dragNow]);
+  }, [ocrBoxes, highlightBoxes, boundBoxes, selectedBoxIds, page, vp, ocrSize, tool, dragStart, dragNow]);
 
-  // ---------- Pointer logic ----------
-  function hitTestClient(clientX: number, clientY: number): number | null {
+  // -------- Hit testing (for select tool) --------
+  function hitTestClient(clientX: number, clientY: number): { id?:string; idx:number } | null {
     if (!overlay.current || !vp || !ocrSize) return null;
     const r = overlay.current.getBoundingClientRect();
     const pxCss = clientX - r.left;
@@ -164,15 +184,26 @@ export default function PdfCanvas({
     const sx = vp.wCss / ocrSize.width;
     const sy = vp.hCss / ocrSize.height;
 
-    for (let i = boxes.length - 1; i >= 0; i--) {
-      const b = boxes[i];
-      if (b.page !== page) continue;
-      const x = b.x0 * sx, y = b.y0 * sy, w = (b.x1 - b.x0) * sx, h = (b.y1 - b.y0) * sy;
-      if (pxCss >= x && pxCss <= x + w && pyCss >= y && pyCss <= y + h) return i;
+    // Prefer bound > highlight > ocr when overlapping
+    const layers: { arr: Box[] }[] = [
+      { arr: boundBoxes.filter(b => b.page === page) },
+      { arr: highlightBoxes.filter(b => b.page === page) },
+      { arr: ocrBoxes.filter(b => b.page === page) }
+    ];
+
+    for (const { arr } of layers) {
+      for (let i = arr.length - 1; i >= 0; i--) {
+        const b = arr[i];
+        const x = b.x0 * sx, y = b.y0 * sy, w = (b.x1 - b.x0) * sx, h = (b.y1 - b.y0) * sy;
+        if (pxCss >= x && pxCss <= x + w && pyCss >= y && pyCss <= y + h) {
+          return { id: b.id, idx: i };
+        }
+      }
     }
     return null;
   }
 
+  // -------- Pointer handlers --------
   const onMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const el = overlay.current; if (!el) return;
     const r = el.getBoundingClientRect();
@@ -183,7 +214,7 @@ export default function PdfCanvas({
       setDragNow({ x: ox, y: oy });
     } else {
       const hit = hitTestClient(e.clientX, e.clientY);
-      if (hit != null && onSelectBox) onSelectBox(hit);
+      if (hit && onSelectBox) onSelectBox(hit.id || "", hit.idx);
     }
   };
 
@@ -202,7 +233,7 @@ export default function PdfCanvas({
     const ax = dragStart.x, ay = dragStart.y;
     const bx = e.clientX - r.left, by = e.clientY - r.top;
 
-    // convert CSS px → OCR px
+    // CSS px → OCR px
     const sx = ocrSize.width  / vp.wCss;
     const sy = ocrSize.height / vp.hCss;
     const a = { x: ax * sx, y: ay * sy };
@@ -223,7 +254,7 @@ export default function PdfCanvas({
       <canvas
         ref={baseCanvas}
         className="pdf-base"
-        style={{ display:"block", transform:"none" }}   // guard against accidental flips
+        style={{ display:"block", transform:"none" }}
       />
       <canvas
         ref={overlay}
@@ -239,27 +270,35 @@ export default function PdfCanvas({
   );
 }
 
-// ---------- helpers ----------
+// ---------- drawing ----------
 function drawStyledRect(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
-  mode: "base" | "sel" | "hl"
+  mode: "ocr" | "hl" | "bound" | "selected"
 ) {
   ctx.save();
-  ctx.setTransform(1,0,0,1,0,0); // ensure no mirroring/scale
-  if (mode === "hl") {
+  ctx.setTransform(1,0,0,1,0,0);
+
+  // palette
+  if (mode === "hl") {                 // orange
     ctx.lineWidth = 3;
     ctx.strokeStyle = "rgba(255,140,0,0.95)";
-    ctx.fillStyle   = "rgba(255,170,0,0.18)";
-  } else if (mode === "sel") {
+    ctx.fillStyle   = "rgba(255,170,0,0.20)";
+  } else if (mode === "bound") {       // green
     ctx.lineWidth = 3;
-    ctx.strokeStyle = "rgba(0,180,255,1)";
-    ctx.fillStyle   = "rgba(0,180,255,0.20)";
-  } else {
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = "rgba(16,158,0,1)";
+    ctx.fillStyle   = "rgba(16,158,0,0.18)";
+  } else if (mode === "selected") {    // purple (emphasis)
+    ctx.lineWidth = 4;
+    ctx.setLineDash([8, 5]);
+    ctx.strokeStyle = "rgba(145, 66, 255, 1)";
+    ctx.fillStyle   = "rgba(145, 66, 255, 0.10)";
+  } else {                             // ocr (blue)
+    ctx.lineWidth = 1.75;
     ctx.strokeStyle = "rgba(0,120,200,0.9)";
-    ctx.fillStyle   = "rgba(0,160,255,0.12)";
+    ctx.fillStyle   = "rgba(0,160,255,0.10)";
   }
+
   ctx.fillRect(x, y, w, h);
   ctx.strokeRect(x, y, w, h);
   ctx.restore();
