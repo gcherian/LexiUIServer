@@ -18,7 +18,7 @@ export type FieldState = {
   name?: string | null;      // alias accepted; mapped -> key on save
   value?: string | null;
   confidence?: number | null;
-  source?: string | null;    // ecm|ocr|user|llm
+  source?: string | null;    // ecm|ocr|user|llm|bbox|lasso
   page?: number | null;
   bbox?: (Rect & { page: number }) | null;
 };
