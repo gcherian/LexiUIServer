@@ -1,31 +1,45 @@
+/* Layout */
 .app-root { height: 100vh; display: flex; flex-direction: column; }
-.tabs { display:flex; gap:.5rem; border-bottom:1px solid #e5e7eb; padding:.5rem; }
-.tab { padding:.4rem .8rem; border:1px solid #e5e7eb; background:#fff; border-radius:6px 6px 0 0; }
-.tab.active { background:#f3f4f6; border-bottom-color: #f3f4f6; }
-.tab-body { flex:1; min-height:0; }
+.workbench { display: flex; flex-direction: column; height: 100%; gap: .5rem; padding: .5rem; }
+.wb-toolbar { display: flex; align-items: center; gap: .5rem; }
+.wb-toolbar .spacer { flex: 1; }
+.wb-split { display: grid; grid-template-columns: 1fr 400px; gap: .75rem; height: calc(100% - 48px); }
 
-.workbench { display:flex; flex-direction:column; height:100%; gap:.5rem; padding:.5rem; }
-.wb-toolbar { display:flex; align-items:center; gap:.5rem; }
-.wb-toolbar .spacer { flex:1; }
-.wb-split { display:grid; grid-template-columns: 1fr 380px; gap: .75rem; height: calc(100% - 44px); }
-.wb-left { position:relative; overflow:auto; background:#f8f9fb; border:1px solid #e5e7eb; border-radius:8px; }
-.pdf-stage { position:relative; display:inline-block; }
-.pdf-stage canvas { display:block; }
-.pdf-stage .overlay { position:absolute; inset:0; pointer-events:auto; }
+/* Panels */
+.wb-left { position: relative; overflow: auto; background: #f8f9fb; border: 1px solid #e5e7eb; border-radius: 8px; padding: .5rem; }
+.wb-right { overflow: auto; border: 1px solid #e5e7eb; border-radius: 8px; padding: .75rem; background: #fff; }
+
+/* PDF stage */
+.pdf-stage { position: relative; display: inline-block; }
+.pdf-stage canvas { display: block; }
+.overlay { position: absolute; inset: 0; pointer-events: auto; }
 .overlay.crosshair { cursor: crosshair; }
-.bbox-rect { fill: rgba(255, 215, 0, 0.20); stroke: rgba(255, 165, 0, 0.95); stroke-width: 1.5; }
-.bbox-rect.selected { fill: rgba(30, 144, 255, 0.18); stroke: rgba(30, 144, 255, 0.95); stroke-width: 2; }
-.bbox-rect.drawing { fill: rgba(0,0,0,0.06); stroke-dasharray: 4 3; }
-.bbox-label { font: 12px/1 monospace; fill: #1f2937; paint-order: stroke; stroke-width: 2; stroke: white; }
-.wb-right { overflow:auto; border:1px solid #e5e7eb; border-radius:8px; padding:.75rem; background:white; }
-.field-card { display:flex; flex-direction:column; gap:.6rem; }
-.row { display:grid; grid-template-columns: 90px 1fr; gap:.5rem; align-items:center; }
-.grid { display:grid; grid-template-columns: repeat(2, 1fr); gap:.5rem; }
-.actions { display:flex; gap:.5rem; justify-content:flex-end; margin-top:.25rem; }
-.primary { background:#2563eb; color:white; border:none; border-radius:6px; padding:.5rem .8rem; cursor:pointer; }
-.placeholder { color:#6b7280; font-style:italic; }
-.page-indicator { font-variant-numeric: tabular-nums; margin: 0 .5rem; }
-.input { width: 480px; max-width: 60vw; }
-.loading { position:absolute; top:.5rem; left:.5rem; background:#111827; color:white; padding:.2rem .4rem; border-radius:4px; font-size:12px; }
-.btn.toggle { border:1px solid #d1d5db; background:#fff; padding:.35rem .6rem; border-radius:6px; cursor:pointer; }
-.btn.toggle.active { background:#e0e7ff; border-color:#6366f1; }
+
+/* Boxes */
+.bbox-rect { fill: rgba(255, 215, 0, 0.22); stroke: rgba(255, 165, 0, 0.95); stroke-width: 1.5; }
+.bbox-rect.drawing { fill: rgba(0,0,0,0.08); stroke-dasharray: 4 3; }
+
+/* Controls */
+.btn.toggle { border: 1px solid #d1d5db; background: #fff; padding: .35rem .6rem; border-radius: 6px; cursor: pointer; user-select: none; }
+.btn.toggle input { margin-right: .3rem; }
+.btn.toggle.active { background: #e0e7ff; border-color: #6366f1; }
+.primary { background: #2563eb; color: white; border: none; border-radius: 6px; padding: .45rem .8rem; cursor: pointer; }
+.input { min-width: 360px; max-width: 60vw; }
+
+/* Forms */
+.row { display: grid; grid-template-columns: 90px 1fr; gap: .5rem; align-items: center; margin-top: .25rem; }
+.field-list { display: flex; flex-direction: column; gap: .5rem; }
+.field-row { display: grid; grid-template-columns: 180px 1fr auto; gap: .5rem; align-items: center; }
+.section-title { font-weight: 600; margin-bottom: .25rem; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+.muted { color: #6b7280; font-size: 12px; }
+.hint, .meta-hint { color: #6b7280; font-size: 12px; margin-top: .5rem; }
+.placeholder { color: #6b7280; font-style: italic; padding: .5rem; }
+
+/* Page controls in canvas */
+.toolbar-inline { display: flex; align-items: center; gap: .5rem; margin-bottom: .25rem; }
+.page-indicator { font-variant-numeric: tabular-nums; }
+
+/* Links */
+a.btn-link { text-decoration: none; color: #2563eb; }
+a.btn-link:hover { text-decoration: underline; }
