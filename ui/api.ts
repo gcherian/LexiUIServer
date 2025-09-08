@@ -245,3 +245,17 @@ export async function saveField(
   const field: FieldState = { key, value, bbox: bbox || null, confidence, source: "user" };
   return saveFieldState({ doc_url, field });
 }
+
+// ---- Legacy name shims (keep old callers compiling) ----
+// old: search(query)  -> new: tokenSearch(doc_id, query, topk?)
+export const search = tokenSearch;
+
+// old: listProms()   -> new: listPromDoctypes()
+export const listProms = listPromDoctypes;
+
+// old: setDocType(id, dt) -> new: setDoctype(id, dt)
+export const setDocType = setDoctype;
+
+// old code already calls saveFieldState(payload) (we export it above), so no change needed
+// If any caller used saveField(docUrl, key, value, bbox, confidence), we export that helper too:
+export { saveField } from "./api";

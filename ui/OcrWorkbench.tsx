@@ -1,453 +1,257 @@
-import { useEffect, useMemo, useState, type ChangeEvent } from "react";
-import PdfViewerFS from "./PdfViewerFS";
+import { useEffect, useMemo, useState } from "react";
 import {
-  uploadDoc, getMeta, getBoxes, search,
-  listProms, getProm, setDocType, getFieldState, saveFieldState,
-  ecmExtract, bindField, semanticSearch
+  API,
+  uploadPdf,
+  getMetaByDocId,
+  docUrlFromId,
+  guessDocIdFromUrl,
+  listPromDoctypes,
+  getPromCatalog,
+  setDoctype,
+  listFields,
+  saveFieldState,
+  tokenSearch,
+  type FieldState,
+  type PromCatalog,
+  type MetaResp,
 } from "../../lib/api";
-import "./ocr.css";
 
-/** shared rect/box types to match PdfCanvas */
-type Rect = { x0:number; y0:number; x1:number; y1:number };
-type Box  = Rect & { page:number; id?:string; label?:string; text?:string };
-
-type Match = { page:number; bbox:Rect; text:string; score:number };
-
-type FieldState = {
-  key: string;
-  value?: string | null;
-  bbox?: (Rect & { page:number }) | null;
-  source: string;                 // "ocr" | "ecm" | "user" | "lasso"
-  confidence?: number;
-};
-type FieldDocState = { doc_id:string; doctype:string; fields: FieldState[]; audit:any[] };
-
-const API = "http://localhost:8000/lasso";
+type Status = "idle" | "loading" | "ready" | "error";
 
 export default function OcrWorkbench() {
-  // --------- document + meta ----------
-  const [doc, setDoc] = useState<{ doc_id:string; pdfUrl:string } | null>(null);
-  const [meta, setMeta] = useState<{ pages:{page:number;width:number;height:number}[] } | null>(null);
+  const [status, setStatus] = useState<Status>("idle");
+  const [error, setError] = useState<string | null>(null);
 
-  const [page, setPage] = useState(1);
-  const [scale, setScale] = useState(1.25);
-  const [viewerOpen, setViewerOpen] = useState(false);
+  const [docId, setDocId] = useState<string>("");
+  const [docUrl, setDocUrl] = useState<string>("");
+  const [meta, setMeta] = useState<MetaResp | null>(null);
 
-  // --------- doctype (PROM) ----------
-  const [doctype, setDoctypeState] = useState("invoice");
-  const [doctypeOptions, setDoctypeOptions] = useState<string[]>(["invoice","lease_loan"]);
+  const [proms, setProms] = useState<Array<{ doctype: string; file: string }>>([]);
+  const [catalog, setCatalog] = useState<PromCatalog | null>(null);
+  const [doctype, setDoctypeLocal] = useState<string>("");
 
-  // --------- extraction state + overlays ----------
-  const [fstate, setFstate] = useState<FieldDocState | null>(null);
+  const [fields, setFields] = useState<FieldState[]>([]);
+  const [searchQ, setSearchQ] = useState<string>("invoice");
+  const [searchResults, setSearchResults] = useState<Array<{ page: number; score: number }>>([]);
 
-  const [ocrTokens, setOcrTokens] = useState<Box[]>([]);   // all OCR tokens (blue) – hidden by default in viewer
-  const [highlights, setHighlights] = useState<Box[]>([]); // search / semantic hits (orange)
+  // --- helpers ---
+  const resolvedDocId = useMemo(() => docId || guessDocIdFromUrl(docUrl) || "", [docId, docUrl]);
+  const canOperate = !!resolvedDocId;
 
-  // --------- filters ----------
-  const [filterKV, setFilterKV] = useState("");
-  const [filterHL, setFilterHL] = useState("");
-
-  // --------- binding ----------
-  const [bindKey, setBindKey] = useState<string | null>(null);
-
-  // --------- optional viewer debug toggle ----------
-  const [showOcrInViewer, setShowOcrInViewer] = useState(false); // Kofax-like default: false
-
-  // --------- helpers ----------
-  function toAbs(u: string) {
-    return u.startsWith("http") ? u : `http://localhost:8000${u}`;
-  }
-
-  function normalizeBoxes(raw: any[]): Box[] {
-    // Ensure id + 1-based page
-    return (raw || []).map((b:any, i:number) => ({
-      id: b.id ?? `bx_${i}`,
-      page: (b.page ?? 0) + 1,
-      x0: +b.x0, y0: +b.y0, x1: +b.x1, y1: +b.y1,
-      text: b.text ?? "",
-      label: b.label ?? undefined,
-    }));
-  }
-
-  // --------- bootstrap PROMs (doctype list) ----------
+  // Load PROM doctypes once
   useEffect(() => {
     (async () => {
       try {
-        const list = await listProms(API);
-        const names = (list.doctypes || []).map((d:any)=> d.doctype).filter(Boolean);
-        if (names.length) {
-          setDoctypeOptions(names);
-          if (!names.includes(doctype)) setDoctypeState(names[0]);
-        }
-        await getProm(API, doctype).catch(()=>{});
-      } catch { /* keep defaults */ }
+        const ds = await listPromDoctypes();
+        setProms(ds);
+      } catch (e: any) {
+        console.warn("PROM list failed", e);
+      }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // --------- actions ----------
-  async function doUpload(e: ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0]; if (!f) return;
-    const res = await uploadDoc(API, f, "tesseract");
-    const pdfUrl = toAbs(res.annotated_tokens_url);
-    setDoc({ doc_id: res.doc_id, pdfUrl });
+  // If user pastes a /data/{doc_id}/original.pdf into docUrl
+  useEffect(() => {
+    if (!docUrl) return;
+    const maybe = guessDocIdFromUrl(docUrl);
+    if (maybe && !docId) setDocId(maybe);
+  }, [docUrl]); // eslint-disable-line
 
-    const m = await getMeta(API, res.doc_id);
-    setMeta(m);
-
-    // init fields json according to doctype
-    await setDocType(API, res.doc_id, doctype);
-    const s = await getFieldState(API, res.doc_id);
-    setFstate(s);
-
-    // load OCR tokens (for optional debug layer)
-    try {
-      const raw = await getBoxes(API, res.doc_id);
-      setOcrTokens(normalizeBoxes(raw));
-    } catch {
-      setOcrTokens([]);
-    }
-
-    setHighlights([]);
-    setPage(1);
-    setScale(1.25);
-  }
-
-  async function runECM() {
-    if (!doc) return;
-    const s = await ecmExtract(API, doc.doc_id, doctype); // initializes if missing
-    setFstate(s);
-  }
-
-  async function saveFields() {
-    if (!doc || !fstate) return;
-    const saved = await saveFieldState(API, doc.doc_id, fstate);
-    setFstate(saved);
-    alert("Saved extraction JSON.");
-  }
-
-  function startBind(key: string) {
-    setBindKey(key);
-    setViewerOpen(true);
-  }
-
-  async function onLasso(pageNum: number, rect: Rect) {
-    if (!doc || !bindKey || !fstate) return;
-    const s = await bindField(API, doc.doc_id, bindKey, pageNum, rect);
-    setFstate(s);
-
-    const val = s.fields.find(f => f.key === bindKey)?.value || "";
-    setBindKey(null);
-    setViewerOpen(false);
-    setPage(pageNum);
-    alert(`Bound "${bindKey}" to:\n${val}`);
-  }
-
-  async function doSearch(q: string) {
-    if (!doc || !q.trim()) return;
-    const r = await search(API, doc.doc_id, q, 60);
-    const m: Match[] = r.matches || [];
-    setHighlights(m.map(({ page, bbox, text }, i) => ({
-      id: `hl_${i}`,
-      page,
-      ...bbox,
-      text,
-      label: text
-    })));
-    if (m.length) setPage(m[0].page);
-  }
-
-  async function doSemantic(q: string) {
-    if (!doc || !q.trim()) return;
-    const r = await semanticSearch(API, doc.doc_id, q, 10);
-    if (Array.isArray(r.results) && r.results.length) {
-      const bx: Box[] = r.results
-        .filter((it:any)=> it?.bbox && typeof it.page === "number")
-        .map((it:any, i:number)=> ({
-          id:`sem_${i}`,
-          page: it.page,
-          x0: it.bbox.x0, y0: it.bbox.y0, x1: it.bbox.x1, y1: it.bbox.y1,
-          text: it.text ?? ""
-        }));
-      if (bx.length) setHighlights(bx);
-      setPage(r.results[0].page);
-    }
-  }
-
-  // --------- derived UI data ----------
-  const kvRows = useMemo(() => {
-    if (!fstate) return [];
-    const q = filterKV.trim().toLowerCase();
-    return fstate.fields.filter(f =>
-      !q || f.key.toLowerCase().includes(q) || (f.value ?? "").toLowerCase().includes(q)
-    );
-  }, [fstate, filterKV]);
-
-  const hlRows = useMemo(() => {
-    const q = filterHL.trim().toLowerCase();
-    return highlights.filter(b =>
-      !q || (b.text ?? "").toLowerCase().includes(q) || ("" + b.page).includes(q)
-    );
-  }, [highlights, filterHL]);
-
-  // current page OCR size (meta may be 1- or 0-based; try both)
-  const ocrSize = useMemo(() => {
-    if (!meta) return undefined;
-    return (
-      meta.pages.find(p => p.page === page) ||
-      meta.pages.find(p => p.page === page - 1)
-    );
-  }, [meta, page]);
-
-  // bound boxes (from ECM/user edits) – these are the ONLY ones we show in viewer by default
-  const boundBoxes: Box[] = useMemo(() => {
-    if (!fstate) return [];
-    const res: Box[] = [];
-    for (const f of fstate.fields) {
-      if (f.bbox) {
-        res.push({
-          id: f.key,
-          page: f.bbox.page,
-          x0: f.bbox.x0, y0: f.bbox.y0, x1: f.bbox.x1, y1: f.bbox.y1,
-          text: f.value ?? "",
-          label: f.key
-        });
+  // When docId changes, pull meta and current fields
+  useEffect(() => {
+    (async () => {
+      if (!resolvedDocId) return;
+      setStatus("loading");
+      setError(null);
+      try {
+        const m = await getMetaByDocId(resolvedDocId);
+        setMeta(m);
+        const url = docUrlFromId(resolvedDocId);
+        setDocUrl(url);
+        const fs = await listFields({ doc_url: url });
+        setFields(fs || []);
+        setStatus("ready");
+      } catch (e: any) {
+        setStatus("error");
+        setError(String(e?.message || e));
       }
+    })();
+  }, [resolvedDocId]); // eslint-disable-line
+
+  async function onUpload(ev: React.ChangeEvent<HTMLInputElement>) {
+    const f = ev.target.files?.[0];
+    if (!f) return;
+    setStatus("loading");
+    setError(null);
+    try {
+      const res = await uploadPdf(f);
+      setDocId(res.doc_id);
+      setDocUrl(res.annotated_tokens_url);
+      const m = await getMetaByDocId(res.doc_id);
+      setMeta(m);
+      const fs = await listFields({ doc_url: res.annotated_tokens_url });
+      setFields(fs || []);
+      setStatus("ready");
+    } catch (e: any) {
+      setStatus("error");
+      setError(String(e?.message || e));
     }
-    return res;
-  }, [fstate]);
+  }
 
-  const selectedBoxIds = bindKey ? [bindKey] : [];
+  async function onChooseDoctype(dt: string) {
+    try {
+      setDoctypeLocal(dt);
+      // load PROM for view only (labels/types)
+      const cat = await getPromCatalog(dt);
+      setCatalog(cat);
+      if (resolvedDocId) {
+        await setDoctype(resolvedDocId, dt);
+      }
+    } catch (e: any) {
+      console.warn("setDoctype failed", e);
+    }
+  }
 
-  // --------- UI ----------
+  async function onSaveField(idx: number) {
+    if (!docUrl) return;
+    const f = fields[idx];
+    if (!f) return;
+    // Normalize: use key if present, otherwise name
+    const payload: FieldState = { ...f };
+    if (!payload.key && payload.name) payload.key = payload.name;
+    await saveFieldState({ doc_url: docUrl, field: payload });
+    // No need to refetch; keep local
+  }
+
+  async function onSearch() {
+    if (!resolvedDocId || !searchQ) {
+      setSearchResults([]);
+      return;
+    }
+    try {
+      // tokenSearch returns hits (page,bbox,score); but showing a page score list is simpler
+      const hits = await tokenSearch(resolvedDocId, searchQ, 30);
+      const agg = new Map<number, number>();
+      for (const h of hits) agg.set(h.page, Math.max(agg.get(h.page) || 0, h.score));
+      setSearchResults([...agg.entries()].map(([page, score]) => ({ page, score })).sort((a,b) => b.score - a.score));
+    } catch (e) {
+      setSearchResults([]);
+    }
+  }
+
+  const pages = meta?.pages?.length ?? 0;
+
   return (
-    <div className="ocr-app">
-      <header className="ocr-header">
-        <div className="brand">
-          <span className="wf">WELLS FARGO</span><span className="pipe">|</span>
-          <span className="app">EDIP · Extraction Review</span>
-        </div>
+    <div className="workbench" style={{ padding: 12 }}>
+      <div className="wb-toolbar" style={{ gap: 8, display: "flex", alignItems: "center" }}>
+        <input type="file" accept="application/pdf" onChange={onUpload} />
+        <input
+          className="input"
+          placeholder="Paste /data/{doc_id}/original.pdf or any PDF URL"
+          value={docUrl}
+          onChange={(e) => setDocUrl(e.target.value)}
+          style={{ width: 420 }}
+        />
+        <span style={{ marginLeft: "auto" }}>
+          API: <code>{API}</code>
+        </span>
+      </div>
 
-        <div className="toolbar">
-          <div className="toolseg">
-            <label>Upload</label>
-            <input type="file" accept="application/pdf" onChange={doUpload} />
+      {status === "error" && <div style={{ color: "crimson" }}>Error: {error}</div>}
+
+      <div className="wb-split" style={{ display: "grid", gridTemplateColumns: "1fr 420px", gap: 12, height: "calc(100% - 44px)" }}>
+        {/* LEFT: Document & Search */}
+        <div className="wb-left" style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 12 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+            <strong>Document</strong>
+            {resolvedDocId && <span>(id: {resolvedDocId})</span>}
+            {pages ? <span style={{ marginLeft: "auto" }}>{pages} pages</span> : null}
           </div>
+          {docUrl ? (
+            <iframe
+              title="pdf"
+              src={docUrl}
+              style={{ width: "100%", height: 420, border: "1px solid #e5e7eb", borderRadius: 6 }}
+            />
+          ) : (
+            <div style={{ color: "#6b7280", fontStyle: "italic" }}>Upload or paste a PDF URL to begin.</div>
+          )}
 
-          <div className="toolseg">
-            <label>DocType</label>
-            <select value={doctype} onChange={e=> setDoctypeState(e.target.value)}>
-              {doctypeOptions.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
+          <div style={{ marginTop: 12, display: "flex", gap: 8, alignItems: "center" }}>
+            <input
+              placeholder="Search tokens…"
+              value={searchQ}
+              onChange={(e) => setSearchQ(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && onSearch()}
+            />
+            <button onClick={onSearch}>Search</button>
+            <a href="/workbench/bbox" style={{ marginLeft: "auto" }}>Open BBox Workbench →</a>
           </div>
-
-          <div className="toolseg">
-            <button onClick={runECM} disabled={!doc}>Run ECM</button>
-            <button className="primary" onClick={saveFields} disabled={!doc || !fstate}>Save JSON</button>
-          </div>
-
-          <div className="toolseg">
-            <label>PDF</label>
-            <div className="seg">
-              <button
-                type="button"
-                onClick={()=>{ if(doc){ setViewerOpen(true); } }}
-                disabled={!doc}
-              >
-                Open Viewer
-              </button>
-              {doc && <span className="meter">p{page}{meta?`/${meta.pages.length}`:""}</span>}
-            </div>
-          </div>
-
-          <div className="toolseg">
-            <label>Find</label>
-            <div className="seg">
-              <input
-                id="q"
-                className="w200"
-                placeholder="Token search…"
-                onKeyDown={(e)=>{ if(e.key==="Enter"){ const v=(e.target as HTMLInputElement).value; doSearch(v); }}}
-              />
-              <button onClick={()=>{ const v=(document.getElementById("q") as HTMLInputElement).value; doSearch(v); }}>Go</button>
-            </div>
-          </div>
-
-          <div className="toolseg">
-            <label>Semantic</label>
-            <div className="seg">
-              <input
-                id="qs"
-                className="w200"
-                placeholder="Meaning-based…"
-                onKeyDown={(e)=>{ if(e.key==="Enter"){ const v=(e.target as HTMLInputElement).value; doSemantic(v); }}}
-              />
-              <button onClick={()=>{ const v=(document.getElementById("qs") as HTMLInputElement).value; doSemantic(v); }}>Jump</button>
-            </div>
-          </div>
-
-          {/* Optional viewer debug, off by default */}
-          <div className="toolseg">
-            <label>Debug</label>
-            <div className="seg">
-              <label style={{display:"inline-flex", alignItems:"center", gap:6}}>
-                <input type="checkbox" checked={showOcrInViewer} onChange={e=> setShowOcrInViewer(e.target.checked)} />
-                Show OCR tokens
-              </label>
-            </div>
-          </div>
-
-          {bindKey && (
-            <div className="toolseg">
-              <label>Binding</label>
-              <div className="seg">
-                <span className="meter">{bindKey}</span>
-                <button onClick={()=> setBindKey(null)}>Cancel</button>
-              </div>
+          {searchResults.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontSize: 12, color: "#6b7280" }}>Top pages:</div>
+              <ul>
+                {searchResults.map((r) => (
+                  <li key={r.page}>Page {r.page} (score {r.score.toFixed(3)})</li>
+                ))}
+              </ul>
             </div>
           )}
         </div>
-      </header>
 
-      <main className="ocr-main" style={{ gridTemplateColumns: "1fr 1fr" }}>
-        {/* Left: KV table */}
-        <section className="panel">
-          <div className="panel-title">Key ↔ Value</div>
-          <div className="table-tools">
-            <input className="filter" placeholder="Filter keys/values…" value={filterKV} onChange={e=> setFilterKV(e.target.value)} />
+        {/* RIGHT: Doctype & Fields */}
+        <div className="wb-right" style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 12, overflow: "auto" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "120px 1fr", gap: 8, alignItems: "center" }}>
+            <label>Doctype</label>
+            <select
+              value={doctype}
+              onChange={(e) => onChooseDoctype(e.target.value)}
+              disabled={!canOperate}
+            >
+              <option value="">(select)</option>
+              {proms.map((p) => (
+                <option key={p.doctype} value={p.doctype}>{p.doctype}</option>
+              ))}
+            </select>
+
+            {catalog && (
+              <>
+                <label>Catalog</label>
+                <div style={{ fontSize: 12, color: "#6b7280" }}>{catalog.doctype} v{catalog.version}</div>
+              </>
+            )}
           </div>
-          <div className="table-wrap">
-            <table className="grid">
-              <thead>
-                <tr>
-                  <th style={{width:220}}>Key</th>
-                  <th>Value</th>
-                  <th style={{width:120}}>Source / Len</th>
-                  <th style={{width:160}}>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {kvRows.map((f)=>(
-                  <tr key={f.key} className={bindKey===f.key ? "active" : ""}>
-                    <td className="mono">{f.key}</td>
-                    <td>
-                      <div style={{display:"flex", alignItems:"center", gap:8}}>
-                        <input
-                          className="cell-input"
-                          style={{flex:1, minWidth:240}}
-                          value={f.value ?? ""}
-                          title={f.value ?? ""}
-                          onChange={e=>{
-                            if (!fstate) return;
-                            setFstate({
-                              ...fstate,
-                              fields: fstate.fields.map(g =>
-                                g.key===f.key ? {...g, value:e.target.value, source:"user"} : g
-                              )
-                            });
-                          }}
-                        />
-                        <button
-                          className="secondary"
-                          onClick={()=> navigator.clipboard.writeText(String(f.value ?? ""))}
-                          title="Copy value"
-                        >
-                          Copy
-                        </button>
-                      </div>
-                    </td>
-                    <td style={{whiteSpace:"nowrap"}}>
-                      <span className="tag">{f.source || "user"}</span>
-                      <span className="mono dim" style={{marginLeft:8}}>{String(f.value ?? "").length} ch</span>
-                    </td>
-                    <td>
-                      <div className="row-actions">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            startBind(f.key);
-                            setViewerOpen(true);
-                            if (f.bbox?.page) setPage(f.bbox.page);
-                          }}
-                          disabled={!doc}
-                        >
-                          Bind from PDF
-                        </button>
-                        {f.bbox && (
-                          <button
-                            className="secondary"
-                            onClick={()=>{
-                              setPage(f.bbox!.page);
-                              setViewerOpen(true);
-                            }}
-                          >
-                            View bbox
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
+
+          <div style={{ marginTop: 12 }}>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>Fields</div>
+            {fields.length === 0 ? (
+              <div style={{ color: "#6b7280", fontStyle: "italic" }}>No fields yet. Choose a doctype and/or add fields from the BBox Workbench.</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {fields.map((f, i) => (
+                  <div key={(f.key || f.name || "") + i} style={{ display: "grid", gridTemplateColumns: "140px 1fr auto", gap: 8, alignItems: "center" }}>
+                    <div title={f.key || f.name} style={{ fontFamily: "monospace" }}>{f.key || f.name}</div>
+                    <input
+                      value={f.value ?? ""}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setFields((prev) => prev.map((x, idx) => (idx === i ? { ...x, value: v } : x)));
+                      }}
+                    />
+                    <button onClick={() => onSaveField(i)}>Save</button>
+                  </div>
                 ))}
-                {kvRows.length===0 && (<tr><td colSpan={4} className="empty">No fields yet. Upload a PDF and Run ECM.</td></tr>)}
-              </tbody>
-            </table>
+              </div>
+            )}
           </div>
-        </section>
 
-        {/* Right: Highlights */}
-        <section className="panel">
-          <div className="panel-title">Highlights</div>
-          <div className="table-tools">
-            <input className="filter" placeholder="Filter by text or page…" value={filterHL} onChange={e=> setFilterHL(e.target.value)} />
-          </div>
-          <div className="table-wrap">
-            <table className="grid">
-              <thead>
-                <tr>
-                  <th style={{width:80}}>Page</th>
-                  <th>Text</th>
-                  <th className="mono" style={{width:260}}>BBox (x0,y0 → x1,y1)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {hlRows.map((b, i)=>(
-                  <tr key={`${b.page}-${i}`} onDoubleClick={() => { setPage(b.page); setViewerOpen(true); }}>
-                    <td>p{b.page}</td>
-                    <td className="mono">{b.text ?? ""}</td>
-                    <td className="mono">
-                      ({Math.round(b.x0)},{Math.round(b.y0)}) → ({Math.round(b.x1)},{Math.round(b.y1)})
-                    </td>
-                  </tr>
-                ))}
-                {hlRows.length===0 && (<tr><td colSpan={3} className="empty">No highlights yet. Try Search or Semantic Jump.</td></tr>)}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      </main>
-
-      {/* Viewer */}
-      {viewerOpen && doc && ocrSize && (
-        <PdfViewerFS
-          url={doc.pdfUrl}
-          page={page}
-          onClose={()=> setViewerOpen(false)}
-          onChangePage={(p)=> setPage(Math.max(1, p))}
-          scale={scale}
-          onZoom={(s)=> setScale(s)}
-          ocrSize={{ width: ocrSize.width, height: ocrSize.height }}
-
-          // Kofax-like behavior: only show ECM/user fields in green
-          ocrBoxes={showOcrInViewer ? ocrTokens : []}  // default hidden
-          highlightBoxes={highlights}
-          boundBoxes={boundBoxes}
-          selectedBoxIds={selectedBoxIds}
-
-          bindKey={bindKey}
-          rotationMode="auto"
-          onLasso={onLasso}
-        />
-      )}
+          {!!fields.length && (
+            <div style={{ marginTop: 12, fontSize: 12, color: "#6b7280" }}>
+              Tip: for **field-level** binding, open the BBox tab and lasso/click a box to bind a bbox to the field and OCR its value.
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
