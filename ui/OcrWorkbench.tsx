@@ -34,35 +34,28 @@ export default function OcrWorkbench() {
   const [searchQ, setSearchQ] = useState<string>("invoice");
   const [searchResults, setSearchResults] = useState<Array<{ page: number; score: number }>>([]);
 
-  // --- helpers ---
   const resolvedDocId = useMemo(() => docId || guessDocIdFromUrl(docUrl) || "", [docId, docUrl]);
   const canOperate = !!resolvedDocId;
 
-  // Load PROM doctypes once
   useEffect(() => {
     (async () => {
       try {
         const ds = await listPromDoctypes();
         setProms(ds);
-      } catch (e: any) {
-        console.warn("PROM list failed", e);
-      }
+      } catch {}
     })();
   }, []);
 
-  // If user pastes a /data/{doc_id}/original.pdf into docUrl
   useEffect(() => {
     if (!docUrl) return;
     const maybe = guessDocIdFromUrl(docUrl);
     if (maybe && !docId) setDocId(maybe);
   }, [docUrl]); // eslint-disable-line
 
-  // When docId changes, pull meta and current fields
   useEffect(() => {
     (async () => {
       if (!resolvedDocId) return;
-      setStatus("loading");
-      setError(null);
+      setStatus("loading"); setError(null);
       try {
         const m = await getMetaByDocId(resolvedDocId);
         setMeta(m);
@@ -72,8 +65,7 @@ export default function OcrWorkbench() {
         setFields(fs || []);
         setStatus("ready");
       } catch (e: any) {
-        setStatus("error");
-        setError(String(e?.message || e));
+        setStatus("error"); setError(String(e?.message || e));
       }
     })();
   }, [resolvedDocId]); // eslint-disable-line
@@ -81,8 +73,7 @@ export default function OcrWorkbench() {
   async function onUpload(ev: React.ChangeEvent<HTMLInputElement>) {
     const f = ev.target.files?.[0];
     if (!f) return;
-    setStatus("loading");
-    setError(null);
+    setStatus("loading"); setError(null);
     try {
       const res = await uploadPdf(f);
       setDocId(res.doc_id);
@@ -93,50 +84,42 @@ export default function OcrWorkbench() {
       setFields(fs || []);
       setStatus("ready");
     } catch (e: any) {
-      setStatus("error");
-      setError(String(e?.message || e));
+      setStatus("error"); setError(String(e?.message || e));
+    } finally {
+      (ev.target as HTMLInputElement).value = "";
     }
   }
 
   async function onChooseDoctype(dt: string) {
     try {
       setDoctypeLocal(dt);
-      // load PROM for view only (labels/types)
       const cat = await getPromCatalog(dt);
       setCatalog(cat);
-      if (resolvedDocId) {
-        await setDoctype(resolvedDocId, dt);
-      }
-    } catch (e: any) {
-      console.warn("setDoctype failed", e);
-    }
+      if (resolvedDocId) await setDoctype(resolvedDocId, dt);
+    } catch {}
   }
 
   async function onSaveField(idx: number) {
     if (!docUrl) return;
-    const f = fields[idx];
-    if (!f) return;
-    // Normalize: use key if present, otherwise name
+    const f = fields[idx]; if (!f) return;
     const payload: FieldState = { ...f };
     if (!payload.key && payload.name) payload.key = payload.name;
     await saveFieldState({ doc_url: docUrl, field: payload });
-    // No need to refetch; keep local
   }
 
   async function onSearch() {
-    if (!resolvedDocId || !searchQ) {
-      setSearchResults([]);
-      return;
-    }
+    if (!resolvedDocId || !searchQ) { setSearchResults([]); return; }
     try {
-      // tokenSearch returns hits (page,bbox,score); but showing a page score list is simpler
       const hits = await tokenSearch(resolvedDocId, searchQ, 30);
-      const agg = new Map<number, number>();
-      for (const h of hits) agg.set(h.page, Math.max(agg.get(h.page) || 0, h.score));
-      setSearchResults([...agg.entries()].map(([page, score]) => ({ page, score })).sort((a,b) => b.score - a.score));
-    } catch (e) {
-      setSearchResults([]);
-    }
+      const agg: Record<number, number> = {};
+      for (let i = 0; i < hits.length; i++) {
+        const h = hits[i]; const prev = agg[h.page] ?? 0;
+        agg[h.page] = Math.max(prev, h.score);
+      }
+      const arr = Object.keys(agg).map(k => ({ page: Number(k), score: agg[Number(k)] }));
+      arr.sort((a, b) => b.score - a.score);
+      setSearchResults(arr);
+    } catch { setSearchResults([]); }
   }
 
   const pages = meta?.pages?.length ?? 0;
@@ -160,7 +143,7 @@ export default function OcrWorkbench() {
       {status === "error" && <div style={{ color: "crimson" }}>Error: {error}</div>}
 
       <div className="wb-split" style={{ display: "grid", gridTemplateColumns: "1fr 420px", gap: 12, height: "calc(100% - 44px)" }}>
-        {/* LEFT: Document & Search */}
+        {/* LEFT */}
         <div className="wb-left" style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 12 }}>
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
             <strong>Document</strong>
@@ -168,11 +151,7 @@ export default function OcrWorkbench() {
             {pages ? <span style={{ marginLeft: "auto" }}>{pages} pages</span> : null}
           </div>
           {docUrl ? (
-            <iframe
-              title="pdf"
-              src={docUrl}
-              style={{ width: "100%", height: 420, border: "1px solid #e5e7eb", borderRadius: 6 }}
-            />
+            <iframe title="pdf" src={docUrl} style={{ width: "100%", height: 420, border: "1px solid #e5e7eb", borderRadius: 6 }} />
           ) : (
             <div style={{ color: "#6b7280", fontStyle: "italic" }}>Upload or paste a PDF URL to begin.</div>
           )}
@@ -185,7 +164,7 @@ export default function OcrWorkbench() {
               onKeyDown={(e) => e.key === "Enter" && onSearch()}
             />
             <button onClick={onSearch}>Search</button>
-            <a href="/workbench/bbox" style={{ marginLeft: "auto" }}>Open BBox Workbench →</a>
+            <a href="/bbox_workbench" style={{ marginLeft: "auto" }}>Open BBox Workbench →</a>
           </div>
           {searchResults.length > 0 && (
             <div style={{ marginTop: 8 }}>
@@ -199,15 +178,11 @@ export default function OcrWorkbench() {
           )}
         </div>
 
-        {/* RIGHT: Doctype & Fields */}
+        {/* RIGHT */}
         <div className="wb-right" style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 12, overflow: "auto" }}>
           <div style={{ display: "grid", gridTemplateColumns: "120px 1fr", gap: 8, alignItems: "center" }}>
             <label>Doctype</label>
-            <select
-              value={doctype}
-              onChange={(e) => onChooseDoctype(e.target.value)}
-              disabled={!canOperate}
-            >
+            <select value={doctype} onChange={(e) => onChooseDoctype(e.target.value)} disabled={!canOperate}>
               <option value="">(select)</option>
               {proms.map((p) => (
                 <option key={p.doctype} value={p.doctype}>{p.doctype}</option>
@@ -229,8 +204,8 @@ export default function OcrWorkbench() {
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {fields.map((f, i) => (
-                  <div key={(f.key || f.name || "") + i} style={{ display: "grid", gridTemplateColumns: "140px 1fr auto", gap: 8, alignItems: "center" }}>
-                    <div title={f.key || f.name} style={{ fontFamily: "monospace" }}>{f.key || f.name}</div>
+                  <div key={(f.key || f.name || "") + ":" + i} style={{ display: "grid", gridTemplateColumns: "140px 1fr auto", gap: 8, alignItems: "center" }}>
+                    <div title={String(f.key || f.name || "")} style={{ fontFamily: "monospace" }}>{f.key || f.name}</div>
                     <input
                       value={f.value ?? ""}
                       onChange={(e) => {
