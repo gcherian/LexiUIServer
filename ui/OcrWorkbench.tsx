@@ -8,22 +8,30 @@ import {
   listPromDoctypes,
   getPromCatalog,
   setDoctype,
+  ecmExtract,
   listFields,
   saveFieldState,
   tokenSearch,
   type FieldState,
   type PromCatalog,
   type MetaResp,
+  type Box,
 } from "../../lib/api";
+import PdfCanvasWithBoxes from "./PdfCanvasWithBoxes";
 
-type Status = "idle" | "loading" | "ready" | "error";
+function useQuery() {
+  const [q] = useState(() => new URLSearchParams(window.location.search));
+  return q;
+}
 
 export default function OcrWorkbench() {
-  const [status, setStatus] = useState<Status>("idle");
+  const query = useQuery();
+
+  const [status, setStatus] = useState<"idle"|"loading"|"ready"|"error">("idle");
   const [error, setError] = useState<string | null>(null);
 
   const [docId, setDocId] = useState<string>("");
-  const [docUrl, setDocUrl] = useState<string>("");
+  const [docUrl, setDocUrl] = useState<string>(query.get("doc_url") || "");
   const [meta, setMeta] = useState<MetaResp | null>(null);
 
   const [proms, setProms] = useState<Array<{ doctype: string; file: string }>>([]);
@@ -32,19 +40,12 @@ export default function OcrWorkbench() {
 
   const [fields, setFields] = useState<FieldState[]>([]);
   const [searchQ, setSearchQ] = useState<string>("invoice");
-  const [searchResults, setSearchResults] = useState<Array<{ page: number; score: number }>>([]);
+  const [page, setPage] = useState<number>(1);
+  const [showBoxes, setShowBoxes] = useState<boolean>(true);
 
   const resolvedDocId = useMemo(() => docId || guessDocIdFromUrl(docUrl) || "", [docId, docUrl]);
-  const canOperate = !!resolvedDocId;
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const ds = await listPromDoctypes();
-        setProms(ds);
-      } catch {}
-    })();
-  }, []);
+  useEffect(() => { (async () => { try { setProms(await listPromDoctypes()); } catch {} })(); }, []);
 
   useEffect(() => {
     if (!docUrl) return;
@@ -81,7 +82,7 @@ export default function OcrWorkbench() {
       const m = await getMetaByDocId(res.doc_id);
       setMeta(m);
       const fs = await listFields({ doc_url: res.annotated_tokens_url });
-      setFields(fs || []);
+      setFields(fs || []); setPage(1); setShowBoxes(true);
       setStatus("ready");
     } catch (e: any) {
       setStatus("error"); setError(String(e?.message || e));
@@ -93,10 +94,26 @@ export default function OcrWorkbench() {
   async function onChooseDoctype(dt: string) {
     try {
       setDoctypeLocal(dt);
-      const cat = await getPromCatalog(dt);
-      setCatalog(cat);
-      if (resolvedDocId) await setDoctype(resolvedDocId, dt);
+      const cat = await getPromCatalog(dt); setCatalog(cat);
+      if (resolvedDocId) {
+        await setDoctype(resolvedDocId, dt);
+        // <-- populate fields via ECM mock so users see something immediately
+        const populated = await ecmExtract(resolvedDocId, dt);
+        setFields(populated.fields || []);
+      }
     } catch {}
+  }
+
+  // click a box to create/assign a field
+  function onBoxClick(b: Box) {
+    const id = b.id || `${b.page}:${b.x0}:${b.y0}`;
+    const f: FieldState = {
+      id, name: (b.label || "field").toLowerCase().replace(/\s+/g, "_"),
+      value: "", page: b.page,
+      bbox: { x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1, page: b.page },
+      confidence: b.confidence ?? 0.8, source: "bbox",
+    };
+    setFields(prev => [f, ...prev]);
   }
 
   async function onSaveField(idx: number) {
@@ -108,123 +125,109 @@ export default function OcrWorkbench() {
   }
 
   async function onSearch() {
-    if (!resolvedDocId || !searchQ) { setSearchResults([]); return; }
-    try {
-      const hits = await tokenSearch(resolvedDocId, searchQ, 30);
-      const agg: Record<number, number> = {};
-      for (let i = 0; i < hits.length; i++) {
-        const h = hits[i]; const prev = agg[h.page] ?? 0;
-        agg[h.page] = Math.max(prev, h.score);
-      }
-      const arr = Object.keys(agg).map(k => ({ page: Number(k), score: agg[Number(k)] }));
-      arr.sort((a, b) => b.score - a.score);
-      setSearchResults(arr);
-    } catch { setSearchResults([]); }
+    if (!resolvedDocId || !searchQ) return;
+    const hits = await tokenSearch(resolvedDocId, searchQ, 50);
+    if (hits.length) setPage(hits[0].page); // jump to the best page
   }
 
   const pages = meta?.pages?.length ?? 0;
 
   return (
-    <div className="workbench" style={{ padding: 12 }}>
-      <div className="wb-toolbar" style={{ gap: 8, display: "flex", alignItems: "center" }}>
+    <div className="workbench">
+      <div className="wb-toolbar">
         <input type="file" accept="application/pdf" onChange={onUpload} />
         <input
           className="input"
           placeholder="Paste /data/{doc_id}/original.pdf or any PDF URL"
           value={docUrl}
           onChange={(e) => setDocUrl(e.target.value)}
-          style={{ width: 420 }}
         />
-        <span style={{ marginLeft: "auto" }}>
-          API: <code>{API}</code>
-        </span>
+        <label className={showBoxes ? "btn toggle active" : "btn toggle"} style={{ marginLeft: 8 }}>
+          <input type="checkbox" checked={showBoxes} onChange={() => setShowBoxes(v=>!v)} /> Boxes
+        </label>
+        <span style={{ marginLeft: "auto" }}>API: <code>{API}</code></span>
       </div>
 
       {status === "error" && <div style={{ color: "crimson" }}>Error: {error}</div>}
 
-      <div className="wb-split" style={{ display: "grid", gridTemplateColumns: "1fr 420px", gap: 12, height: "calc(100% - 44px)" }}>
-        {/* LEFT */}
-        <div className="wb-left" style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 12 }}>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
-            <strong>Document</strong>
-            {resolvedDocId && <span>(id: {resolvedDocId})</span>}
-            {pages ? <span style={{ marginLeft: "auto" }}>{pages} pages</span> : null}
-          </div>
+      <div className="wb-split">
+        {/* LEFT — PDF + boxes + search */}
+        <div className="wb-left">
           {docUrl ? (
-            <iframe title="pdf" src={docUrl} style={{ width: "100%", height: 420, border: "1px solid #e5e7eb", borderRadius: 6 }} />
+            <PdfCanvasWithBoxes
+              docUrl={docUrl}
+              page={page}
+              showBoxes={showBoxes}
+              onPageChange={(p)=>setPage(p)}
+              onReady={()=>{}}
+              onBoxClick={onBoxClick}
+            />
           ) : (
-            <div style={{ color: "#6b7280", fontStyle: "italic" }}>Upload or paste a PDF URL to begin.</div>
+            <div className="placeholder">Upload or paste a PDF URL to begin.</div>
           )}
 
-          <div style={{ marginTop: 12, display: "flex", gap: 8, alignItems: "center" }}>
-            <input
-              placeholder="Search tokens…"
-              value={searchQ}
-              onChange={(e) => setSearchQ(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && onSearch()}
-            />
-            <button onClick={onSearch}>Search</button>
-            <a href="/bbox_workbench" style={{ marginLeft: "auto" }}>Open BBox Workbench →</a>
-          </div>
-          {searchResults.length > 0 && (
-            <div style={{ marginTop: 8 }}>
-              <div style={{ fontSize: 12, color: "#6b7280" }}>Top pages:</div>
-              <ul>
-                {searchResults.map((r) => (
-                  <li key={r.page}>Page {r.page} (score {r.score.toFixed(3)})</li>
-                ))}
-              </ul>
+          <div className="row" style={{ marginTop: 8 }}>
+            <label>Search</label>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                placeholder="Search tokens (e.g., 'invoice total')"
+                value={searchQ}
+                onChange={(e) => setSearchQ(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && onSearch()}
+              />
+              <button onClick={onSearch}>Search</button>
+              {docUrl && (
+                <a className="btn-link" href={`/bbox_workbench?doc_url=${encodeURIComponent(docUrl)}`} style={{ marginLeft: "auto" }}>
+                  Open BBox Workbench →
+                </a>
+              )}
             </div>
-          )}
+          </div>
+          <div className="meta-hint">
+            {resolvedDocId ? <>Document: <code>{resolvedDocId}</code> • Pages: {pages || "?"}</> : null}
+          </div>
         </div>
 
-        {/* RIGHT */}
-        <div className="wb-right" style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 12, overflow: "auto" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "120px 1fr", gap: 8, alignItems: "center" }}>
+        {/* RIGHT — doctype + fields */}
+        <div className="wb-right">
+          <div className="row">
             <label>Doctype</label>
-            <select value={doctype} onChange={(e) => onChooseDoctype(e.target.value)} disabled={!canOperate}>
+            <select value={doctype} onChange={(e) => onChooseDoctype(e.target.value)} disabled={!resolvedDocId}>
               <option value="">(select)</option>
-              {proms.map((p) => (
-                <option key={p.doctype} value={p.doctype}>{p.doctype}</option>
-              ))}
+              {proms.map((p) => (<option key={p.doctype} value={p.doctype}>{p.doctype}</option>))}
             </select>
-
-            {catalog && (
-              <>
-                <label>Catalog</label>
-                <div style={{ fontSize: 12, color: "#6b7280" }}>{catalog.doctype} v{catalog.version}</div>
-              </>
-            )}
           </div>
+          {catalog && (
+            <div className="row">
+              <label>Catalog</label>
+              <div className="muted">{catalog.doctype} v{catalog.version}</div>
+            </div>
+          )}
 
           <div style={{ marginTop: 12 }}>
-            <div style={{ fontWeight: 600, marginBottom: 6 }}>Fields</div>
+            <div className="section-title">Fields</div>
             {fields.length === 0 ? (
-              <div style={{ color: "#6b7280", fontStyle: "italic" }}>No fields yet. Choose a doctype and/or add fields from the BBox Workbench.</div>
+              <div className="placeholder">No fields yet. Pick a doctype to pull ECM values or click a box to start a field.</div>
             ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div className="field-list">
                 {fields.map((f, i) => (
-                  <div key={(f.key || f.name || "") + ":" + i} style={{ display: "grid", gridTemplateColumns: "140px 1fr auto", gap: 8, alignItems: "center" }}>
-                    <div title={String(f.key || f.name || "")} style={{ fontFamily: "monospace" }}>{f.key || f.name}</div>
+                  <div className="field-row" key={(f.key || f.name || "f")+":"+i}>
                     <input
-                      value={f.value ?? ""}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        setFields((prev) => prev.map((x, idx) => (idx === i ? { ...x, value: v } : x)));
-                      }}
+                      className="mono"
+                      value={f.name || f.key || ""}
+                      onChange={(e)=>setFields(prev=>prev.map((x,idx)=>idx===i?{...x, name:e.target.value, key:e.target.value}:x))}
                     />
-                    <button onClick={() => onSaveField(i)}>Save</button>
+                    <input
+                      value={f.value || ""}
+                      onChange={(e)=>setFields(prev=>prev.map((x,idx)=>idx===i?{...x, value:e.target.value}:x))}
+                    />
+                    <button onClick={()=>onSaveField(i)}>Save</button>
                   </div>
                 ))}
               </div>
             )}
           </div>
-
-          {!!fields.length && (
-            <div style={{ marginTop: 12, fontSize: 12, color: "#6b7280" }}>
-              Tip: for **field-level** binding, open the BBox tab and lasso/click a box to bind a bbox to the field and OCR its value.
-            </div>
-          )}
+          <div className="hint">Tip: Clicking a box on the left seeds a field with its bounding box.</div>
         </div>
       </div>
     </div>
