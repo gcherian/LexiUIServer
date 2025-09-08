@@ -1,167 +1,68 @@
-// lib/api.ts — complete & aligned with /lasso router
+// src/lib/api.ts
+// Single, consolidated API used by BOTH OcrWorkbench and the new BBox tab.
 
-export async function uploadDoc(API_BASE: string, file: File, engine: string) {
-  const form = new FormData();
-  form.append("pdf", file);
-  form.append("backend", engine);
-  const r = await fetch(`${API_BASE}/upload`, { method: "POST", body: form });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
-}
+type Rect = { x0:number; y0:number; x1:number; y1:number };
+export type Box = Rect & { page:number; id:string; label?:string; confidence?:number };
 
-export async function getMeta(API_BASE: string, docId: string) {
-  const r = await fetch(`${API_BASE}/doc/${docId}/meta`, { cache: "no-store" });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
-}
+export type FieldState = {
+  id?: string;
+  key?: string;           // canonical in Python server
+  name?: string;          // alias accepted from UI
+  value?: string | null;
+  confidence?: number;
+  source?: string;
+  page?: number;
+  bbox?: (Rect & { page:number }) | null;
+};
 
-export async function rebuild(API_BASE: string, docId: string, params: any) {
-  const r = await fetch(`${API_BASE}/doc/${docId}/rebuild`, {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify(params)
+// Resolve API base across envs (Vite, window-injected, Node fallback)
+const API_BASE =
+  (typeof window !== "undefined" && (window as any).__API_BASE__) ||
+  (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_BASE) ||
+  (typeof process !== "undefined" && (process as any).env?.VITE_API_BASE) ||
+  "http://localhost:8000";
+
+function q(obj: Record<string, any>) {
+  const u = new URLSearchParams();
+  Object.entries(obj).forEach(([k, v]) => {
+    if (v === undefined || v === null) return;
+    u.set(k, String(v));
   });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+  return u.toString();
 }
 
-const API = import.meta.env.VITE_API_BASE || "http://localhost:8000";
-
-export async function getBoxes(params: { doc_url: string; page: number }) {
-  const r = await fetch(`${API}/boxes?doc_url=${encodeURIComponent(params.doc_url)}&page=${params.page}`);
+// ---------- Boxes ----------
+export async function getBoxes(params: { doc_url: string; page: number }): Promise<Box[]> {
+  const r = await fetch(`${API_BASE}/boxes?${q(params)}`);
   if (!r.ok) return [];
   return r.json();
 }
 
-export async function listFields(params: { doc_url: string }) {
-  const r = await fetch(`${API}/fields?doc_url=${encodeURIComponent(params.doc_url)}`);
+// ---------- Fields (compat + canonical) ----------
+
+// Back-compat signature: listFields(docUrl, doctype?) and new: listFields({doc_url})
+export async function listFields(arg1: { doc_url: string } | string, _doctype?: string): Promise<FieldState[]> {
+  const doc_url = typeof arg1 === "string" ? arg1 : arg1.doc_url;
+  const r = await fetch(`${API_BASE}/fields?${q({ doc_url })}`);
   if (!r.ok) return [];
   return r.json();
 }
 
-export async function saveFieldState(payload: { doc_url: string; field: any }) {
-  const r = await fetch(`${API}/fields`, {
+// Back-compat + canonical: saveFieldState({ doc_url, field })
+export async function saveFieldState(payload: { doc_url: string; field: FieldState }): Promise<boolean> {
+  const r = await fetch(`${API_BASE}/fields`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
   });
   return r.ok;
 }
 
-export async function saveBoxes(API_BASE: string, docId: string, boxes: any[]) {
-  const r = await fetch(`${API_BASE}/doc/${docId}/boxes`, {
-    method: "PUT",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({ boxes }),
-  });
-  if (!r.ok) throw new Error(await r.text());
+// Optional helpers some callers expect:
+export async function getMeta(doc_id: string) {
+  const r = await fetch(`${API_BASE}/lasso/doc/${doc_id}/meta`);
+  if (!r.ok) throw new Error("meta not found");
   return r.json();
 }
 
-export async function search(API_BASE: string, docId: string, q: string, topk = 20) {
-  const r = await fetch(`${API_BASE}/search`, {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({ doc_id: docId, query: q, topk })
-  });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
-}
-
-export async function lasso(API_BASE: string, docId: string, page: number, rect: any) {
-  const r = await fetch(`${API_BASE}/lasso`, {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({ doc_id: docId, page, ...rect })
-  });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
-}
-
-export async function audit(API_BASE: string, payload: any) {
-  await fetch(`${API_BASE}/audit`, {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify(payload)
-  });
-}
-
-export async function listProms(API_BASE: string) {
-  const r = await fetch(`${API_BASE}/prom`);
-  if (!r.ok) throw new Error(await r.text());
-  return r.json(); // { doctypes: [{doctype, file}] }
-}
-
-export async function getProm(API_BASE: string, doctype: string) {
-  const r = await fetch(`${API_BASE}/prom/${doctype}`);
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
-}
-
-export async function setDocType(API_BASE: string, docId: string, doctype: string) {
-  const r = await fetch(`${API_BASE}/doc/${docId}/doctype`, {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({ doctype })
-  });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
-}
-
-// also supports the short form POST /lasso/doc with {doc_id, doctype}
-export async function setDocTypeShort(API_BASE: string, docId: string, doctype: string) {
-  const r = await fetch(`${API_BASE}/doc`, {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({ doc_id: docId, doctype })
-  });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
-}
-
-export async function getFieldState(API_BASE: string, docId: string) {
-  const r = await fetch(`${API_BASE}/doc/${docId}/fields`);
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
-}
-
-export async function saveFieldState(API_BASE: string, docId: string, state: any) {
-  const r = await fetch(`${API_BASE}/doc/${docId}/fields`, {
-    method: "PUT",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify(state)
-  });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
-}
-
-// ECM auto-inits fields if missing
-export async function ecmExtract(API_BASE: string, docId: string, doctype: string) {
-  const r = await fetch(`${API_BASE}/ecm/extract`, {
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({ doc_id: docId, doctype })
-  });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
-}
-
-export async function bindField(API_BASE: string, docId: string, key: string, page: number, rect: any) {
-  const r = await fetch(`${API_BASE}/doc/${docId}/bind`, {
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({ doc_id: docId, key, page, rect })
-  });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
-}
-
-export async function semanticSearch(API_BASE: string, docId: string, q: string, topk = 5) {
-  const url = new URL(`${API_BASE}/semantic_search`);
-  url.searchParams.set("doc_id", docId);
-  url.searchParams.set("q", q);
-  url.searchParams.set("topk", String(topk));
-  const r = await fetch(url.toString());
-  if (!r.ok) throw new Error(await r.text());
-  return r.json(); // { results: [{page, score}] }
-}
+export const API = API_BASE;
