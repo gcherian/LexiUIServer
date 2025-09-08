@@ -1,11 +1,11 @@
 from __future__ import annotations
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query, Request
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query, Request, FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
 from uuid import uuid4
-import shutil, json, time, difflib
+import shutil, json, time, difflib, re
 
 # Imaging / OCR
 import pytesseract
@@ -26,10 +26,13 @@ except Exception:
     Graph = None  # KG becomes a no-op
 
 # -----------------------------------------------------------------------------
-# Globals (initialized once from main.py via init_paths_for_src)
+# Router
 # -----------------------------------------------------------------------------
 router = APIRouter(prefix="/lasso", tags=["lasso"])
 
+# -----------------------------------------------------------------------------
+# Globals (initialized once from main.py via init_paths_for_src)
+# -----------------------------------------------------------------------------
 SRC_DIR: Path = Path(".")
 PROJECT_ROOT: Path = Path(".")
 DATA: Path = Path(".")   # project_root / "data"
@@ -85,6 +88,24 @@ def fields_path(doc_id: str) -> Path:    return doc_dir(doc_id) / "fields.json"
 def kg_path(doc_id: str) -> Path:        return doc_dir(doc_id) / "kg.ttl"
 def audit_log_path(doc_id: str) -> Path: return doc_dir(doc_id) / "audit.log"
 
+# Parse doc_id from a /data/{doc_id}/original.pdf style URL (or raw doc_id)
+_DOC_URL_RE = re.compile(r"/data/([^/]+)/original\.pdf$", re.IGNORECASE)
+def doc_id_from_doc_url(doc_url: str) -> Optional[str]:
+    if not doc_url:
+        return None
+    # raw doc_id support
+    if (DATA / doc_url / "original.pdf").exists():
+        return doc_url
+    m = _DOC_URL_RE.search(doc_url)
+    if m:
+        did = m.group(1)
+        if pdf_path(did).exists():
+            return did
+    # also accept bare ID-like strings (hex-ish)
+    if re.fullmatch(r"[A-Za-z0-9_-]{6,32}", doc_url):
+        return doc_url
+    return None
+
 # -----------------------------------------------------------------------------
 # Models
 # -----------------------------------------------------------------------------
@@ -103,6 +124,7 @@ class Box(Rect):
     id: Optional[str] = None
     label: Optional[str] = None
     text: Optional[str] = None
+    confidence: Optional[float] = None
 
 class UploadResp(BaseModel):
     doc_id: str
@@ -192,6 +214,7 @@ def run_full_ocr(doc_id: str, params: OCRParams) -> MetaResp:
             txt = (d["text"][i] or "").strip()
             if not txt: continue
             x, y, ww, hh = d["left"][i], d["top"][i], d["width"][i], d["height"][i]
+            # Stored in image pixel space (origin top-left). Keep consistent everywhere.
             all_boxes.append({"page":page_no,"x0":float(x),"y0":float(y),"x1":float(x+ww),"y1":float(y+hh),"text":txt})
             tokens_this_page.append(txt)
         pages_meta.append({"page":page_no,"width":float(w),"height":float(h)})
@@ -248,7 +271,6 @@ def build_kg_from_fields(doc_id: str, doctype: Optional[str]):
         g.serialize(destination=str(kg_path(doc_id)), format="turtle"); return
     state = json.loads(fp.read_text())
     g.add((doc_uri, EDIP.doctype, Literal(state.get("doctype","unknown"))))
-    # Simple: attach all keys/values as literals
     for f in state.get("fields", []):
         key, val = f.get("key"), f.get("value")
         if key and val:
@@ -263,7 +285,7 @@ def assert_prom_ready():
         raise HTTPException(404, f"PROM directory not found at {PROM}")
 
 # -----------------------------------------------------------------------------
-# Endpoints
+# Base endpoints (under /lasso)
 # -----------------------------------------------------------------------------
 @router.get("/health")
 def health():
@@ -285,7 +307,6 @@ async def upload(request: Request, pdf: UploadFile = File(...), backend: str = F
     doc_id = uuid4().hex[:12]
     p = pdf_path(doc_id)
     with p.open("wb") as f: shutil.copyfileobj(pdf.file, f)
-    # OCR (writes boxes/meta/pages/embeddings)
     params = OCRParams()
     run_full_ocr(doc_id, params)
     pages = json.loads(meta_path(doc_id).read_text())["pages"]
@@ -295,9 +316,6 @@ async def upload(request: Request, pdf: UploadFile = File(...), backend: str = F
         annotated_tokens_url=f"{base}/data/{doc_id}/original.pdf",
         pages=len(pages)
     )
-
-# ---- Static-ish helpers for main.py mount (served by main) ----
-# (No endpoint needed here; main.py will mount DATA at /data)
 
 # ---- Meta / Boxes ----
 @router.get("/doc/{doc_id}/meta", response_model=MetaResp)
@@ -497,13 +515,16 @@ async def bind_field(doc_id: str, req: BindReq):
     x0,y0 = max(0,x0-pad), max(0,y0-pad)
     x1,y1 = min(img.width-1,x1+pad), min(img.height-1,y1+pad)
     crop = img.crop((x0,y0,x1,y1))
-    # upscale small crops
     if crop.width < 140 or crop.height < 40:
         scale = 3 if max(crop.width,crop.height) < 60 else 2
         crop = crop.resize((crop.width*scale, crop.height*scale), Image.BICUBIC)
-    # OCR
-    def ocr(psm:int): 
-        return pytesseract.image_to_string(crop, lang=meta.get("params",{}).get("lang","eng"), config=f"--oem 1 --psm {psm} -c preserve_interword_spaces=1").strip()
+
+    def ocr(psm:int):
+        return pytesseract.image_to_string(
+            crop, lang=meta.get("params",{}).get("lang","eng"),
+            config=f"--oem 1 --psm {psm} -c preserve_interword_spaces=1"
+        ).strip()
+
     text = max((ocr(p) for p in (6,7,11)), key=lambda s: (len(s), s.count(" ")), default="")
     target.value = text; target.source = "ocr"; target.confidence = 0.8 if text else 0.0
     target.bbox = {"page": req.page, "x0": req.rect.x0, "y0": req.rect.y0, "x1": req.rect.x1, "y1": req.rect.y1}
@@ -519,3 +540,111 @@ async def get_kg(doc_id: str):
     if not kg_path(doc_id).exists():
         build_kg_from_fields(doc_id, None)
     return {"ttl_path": f"/data/{doc_id}/kg.ttl"}
+
+# -----------------------------------------------------------------------------
+# Frontend-compat endpoints (no /lasso prefix) so the React tab works as-is
+# -----------------------------------------------------------------------------
+# GET /boxes?doc_url=...&page=... -> array of boxes (x0,y0,x1,y1 in image pixel space; origin top-left)
+async def _compat_boxes(doc_url: str, page: int):
+    did = doc_id_from_doc_url(doc_url)
+    if not did:
+        raise HTTPException(400, f"Could not resolve doc_id from doc_url='{doc_url}'")
+    bp = boxes_path(did)
+    if not bp.exists(): return []
+    all_boxes = json.loads(bp.read_text())
+    return [b for b in all_boxes if int(b.get("page", 0)) == int(page)]
+
+# GET /fields?doc_url=... -> FieldDocState.fields (flattened)
+async def _compat_fields_get(doc_url: str):
+    did = doc_id_from_doc_url(doc_url)
+    if not did:
+        raise HTTPException(400, f"Could not resolve doc_id from doc_url='{doc_url}'")
+    fp = fields_path(did)
+    if not fp.exists():
+        # Initialize a minimal empty state if missing
+        empty = FieldDocState(doc_id=did, doctype="unknown", fields=[], audit=[{"ts":int(time.time()),"event":"init-empty"}])
+        fields_path(did).write_text(empty.model_dump_json(indent=2))
+        return []
+    state = FieldDocState(**json.loads(fp.read_text()))
+    # Return just the fields list for compatibility with the UI client
+    return [f.model_dump() for f in state.fields]
+
+# POST /fields { doc_url, field } -> upsert field in FieldDocState
+async def _compat_fields_post(doc_url: str, field: Dict[str, Any]):
+    did = doc_id_from_doc_url(doc_url)
+    if not did:
+        raise HTTPException(400, f"Could not resolve doc_id from doc_url='{doc_url}'")
+    fp = fields_path(did)
+    if fp.exists():
+        state = FieldDocState(**json.loads(fp.read_text()))
+    else:
+        state = FieldDocState(doc_id=did, doctype="unknown", fields=[], audit=[{"ts":int(time.time()),"event":"init-empty"}])
+
+    # Upsert by (key) if present, else by id, else append
+    f_in = field.copy()
+    # Normalize bbox numeric
+    if isinstance(f_in.get("bbox"), dict):
+        for k in ("x0","y0","x1","y1","page"):
+            if k in f_in["bbox"]:
+                try:
+                    f_in["bbox"][k] = float(f_in["bbox"][k]) if k!="page" else int(f_in["bbox"][k])
+                except Exception:
+                    pass
+    key = f_in.get("key") or f_in.get("name")
+    if key and "key" not in f_in:
+        f_in["key"] = key
+    # map 'name' to 'key' for compatibility
+    f_id = f_in.get("id")
+    updated = False
+    if key:
+        for i, fx in enumerate(state.fields):
+            if fx.key == key:
+                # merge
+                newf = fx.model_dump()
+                newf.update({k:v for k,v in f_in.items() if k in ("key","value","bbox","source","confidence")})
+                state.fields[i] = FieldState(**newf)
+                updated = True
+                break
+    if not updated and f_id:
+        for i, fx in enumerate(state.fields):
+            if getattr(fx, "id", None) == f_id:
+                newf = fx.model_dump()
+                newf.update({k:v for k,v in f_in.items() if k in ("key","value","bbox","source","confidence")})
+                state.fields[i] = FieldState(**newf)
+                updated = True
+                break
+    if not updated:
+        # append new field
+        if "confidence" not in f_in: f_in["confidence"] = 0.0
+        if "source" not in f_in: f_in["source"] = "user"
+        state.fields.append(FieldState(**f_in))
+
+    state.audit.append({"ts":int(time.time()),"event":"compat_fields_upsert","key":key or f_id})
+    fields_path(did).write_text(state.model_dump_json(indent=2))
+    build_kg_from_fields(did, state.doctype)
+    return {"ok": True}
+
+# FastAPI route wrappers mounted later by helper (so they live at app root)
+def mount_compat_endpoints(app: FastAPI):
+    @app.get("/boxes")
+    async def boxes_compat(doc_url: str = Query(...), page: int = Query(1)):
+        return await _compat_boxes(doc_url, page)
+
+    @app.get("/fields")
+    async def fields_compat_get(doc_url: str = Query(...)):
+        return await _compat_fields_get(doc_url)
+
+    @app.post("/fields")
+    async def fields_compat_post(payload: Dict[str, Any]):
+        doc_url = payload.get("doc_url")
+        field = payload.get("field")
+        if not doc_url or not isinstance(field, dict):
+            raise HTTPException(400, "Body must include { doc_url, field }")
+        return await _compat_fields_post(doc_url, field)
+
+# -----------------------------------------------------------------------------
+# Convenience to wire from main.py:
+#   app.include_router(ocr_lasso.router)
+#   ocr_lasso.init_paths_for_src(Path(__file__).resolve().parent)
+#   ocr_lasso.mount_compat_endpoints(app)
+# -----------------------------------------------------------------------------

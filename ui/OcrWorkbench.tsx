@@ -17,7 +17,7 @@ type FieldState = {
   key: string;
   value?: string | null;
   bbox?: (Rect & { page:number }) | null;
-  source: string;                 // "ocr" | "ecm" | "user" | etc.
+  source: string;                 // "ocr" | "ecm" | "user" | "lasso"
   confidence?: number;
 };
 type FieldDocState = { doc_id:string; doctype:string; fields: FieldState[]; audit:any[] };
@@ -40,7 +40,7 @@ export default function OcrWorkbench() {
   // --------- extraction state + overlays ----------
   const [fstate, setFstate] = useState<FieldDocState | null>(null);
 
-  const [ocrTokens, setOcrTokens] = useState<Box[]>([]);   // all OCR boxes (blue)
+  const [ocrTokens, setOcrTokens] = useState<Box[]>([]);   // all OCR tokens (blue) – hidden by default in viewer
   const [highlights, setHighlights] = useState<Box[]>([]); // search / semantic hits (orange)
 
   // --------- filters ----------
@@ -49,6 +49,9 @@ export default function OcrWorkbench() {
 
   // --------- binding ----------
   const [bindKey, setBindKey] = useState<string | null>(null);
+
+  // --------- optional viewer debug toggle ----------
+  const [showOcrInViewer, setShowOcrInViewer] = useState(false); // Kofax-like default: false
 
   // --------- helpers ----------
   function toAbs(u: string) {
@@ -76,11 +79,8 @@ export default function OcrWorkbench() {
           setDoctypeOptions(names);
           if (!names.includes(doctype)) setDoctypeState(names[0]);
         }
-        // sanity check default exists
         await getProm(API, doctype).catch(()=>{});
-      } catch {
-        /* keep defaults */
-      }
+      } catch { /* keep defaults */ }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -100,7 +100,7 @@ export default function OcrWorkbench() {
     const s = await getFieldState(API, res.doc_id);
     setFstate(s);
 
-    // load OCR tokens (for the whole doc)
+    // load OCR tokens (for optional debug layer)
     try {
       const raw = await getBoxes(API, res.doc_id);
       setOcrTokens(normalizeBoxes(raw));
@@ -160,7 +160,6 @@ export default function OcrWorkbench() {
   async function doSemantic(q: string) {
     if (!doc || !q.trim()) return;
     const r = await semanticSearch(API, doc.doc_id, q, 10);
-    // build highlight boxes if server returns rects; otherwise just jump to best page
     if (Array.isArray(r.results) && r.results.length) {
       const bx: Box[] = r.results
         .filter((it:any)=> it?.bbox && typeof it.page === "number")
@@ -180,9 +179,7 @@ export default function OcrWorkbench() {
     if (!fstate) return [];
     const q = filterKV.trim().toLowerCase();
     return fstate.fields.filter(f =>
-      !q ||
-      f.key.toLowerCase().includes(q) ||
-      (f.value ?? "").toLowerCase().includes(q)
+      !q || f.key.toLowerCase().includes(q) || (f.value ?? "").toLowerCase().includes(q)
     );
   }, [fstate, filterKV]);
 
@@ -202,7 +199,7 @@ export default function OcrWorkbench() {
     );
   }, [meta, page]);
 
-  // bound boxes (from field state)
+  // bound boxes (from ECM/user edits) – these are the ONLY ones we show in viewer by default
   const boundBoxes: Box[] = useMemo(() => {
     if (!fstate) return [];
     const res: Box[] = [];
@@ -220,7 +217,6 @@ export default function OcrWorkbench() {
     return res;
   }, [fstate]);
 
-  // selected “ids” when binding
   const selectedBoxIds = bindKey ? [bindKey] : [];
 
   // --------- UI ----------
@@ -287,6 +283,17 @@ export default function OcrWorkbench() {
                 onKeyDown={(e)=>{ if(e.key==="Enter"){ const v=(e.target as HTMLInputElement).value; doSemantic(v); }}}
               />
               <button onClick={()=>{ const v=(document.getElementById("qs") as HTMLInputElement).value; doSemantic(v); }}>Jump</button>
+            </div>
+          </div>
+
+          {/* Optional viewer debug, off by default */}
+          <div className="toolseg">
+            <label>Debug</label>
+            <div className="seg">
+              <label style={{display:"inline-flex", alignItems:"center", gap:6}}>
+                <input type="checkbox" checked={showOcrInViewer} onChange={e=> setShowOcrInViewer(e.target.checked)} />
+                Show OCR tokens
+              </label>
             </div>
           </div>
 
@@ -430,11 +437,11 @@ export default function OcrWorkbench() {
           onZoom={(s)=> setScale(s)}
           ocrSize={{ width: ocrSize.width, height: ocrSize.height }}
 
-          // overlays — wire everything so viewer shows the same state
-          ocrBoxes={ocrTokens}
+          // Kofax-like behavior: only show ECM/user fields in green
+          ocrBoxes={showOcrInViewer ? ocrTokens : []}  // default hidden
           highlightBoxes={highlights}
           boundBoxes={boundBoxes}
-          selectedBoxIds={bindKey ? [bindKey] : []}
+          selectedBoxIds={selectedBoxIds}
 
           bindKey={bindKey}
           rotationMode="auto"
@@ -444,4 +451,3 @@ export default function OcrWorkbench() {
     </div>
   );
 }
-

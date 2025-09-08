@@ -25,10 +25,27 @@ export async function rebuild(API_BASE: string, docId: string, params: any) {
   return r.json();
 }
 
-export async function getBoxes(API_BASE: string, docId: string) {
-  const r = await fetch(`${API_BASE}/doc/${docId}/boxes`, { cache: "no-store" });
-  if (!r.ok) throw new Error(await r.text());
+const API = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+
+export async function getBoxes(params: { doc_url: string; page: number }) {
+  const r = await fetch(`${API}/boxes?doc_url=${encodeURIComponent(params.doc_url)}&page=${params.page}`);
+  if (!r.ok) return [];
   return r.json();
+}
+
+export async function listFields(params: { doc_url: string }) {
+  const r = await fetch(`${API}/fields?doc_url=${encodeURIComponent(params.doc_url)}`);
+  if (!r.ok) return [];
+  return r.json();
+}
+
+export async function saveFieldState(payload: { doc_url: string; field: any }) {
+  const r = await fetch(`${API}/fields`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  return r.ok;
 }
 
 export async function saveBoxes(API_BASE: string, docId: string, boxes: any[]) {
