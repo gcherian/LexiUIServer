@@ -1,134 +1,288 @@
+// File: src/components/lasso/PdfCanvas.tsx
 import React, { useEffect, useRef } from "react";
-import type { Box, Rect } from "../../lib/api";
 import { GlobalWorkerOptions, getDocument, type PDFDocumentProxy, type PDFPageProxy } from "pdfjs-dist";
 import pdfjsWorker from "pdfjs-dist/build/pdf.worker.min?url";
+
+// Set the worker (vite/esbuild compatible)
 GlobalWorkerOptions.workerSrc = pdfjsWorker as string;
 
-type Props = {
-  docUrl: string;
+/** Minimal box shape expected from the server. */
+type BoxLike = {
   page: number;
+  x0: number; y0: number; x1: number; y1: number; // TOP-LEFT origin (server space)
+  id?: string | null;
+  label?: string | null;
+  text?: string | null;
+  confidence?: number | null;
+};
+
+export type RectServer = { x0: number; y0: number; x1: number; y1: number };
+
+type Props = {
+  /** Absolute/relative URL to the PDF (e.g., /data/{doc_id}/original.pdf) */
+  docUrl: string;
+  /** 1-based page number to render */
+  page: number;
+
+  /**
+   * Server coordinate-space dimensions for the current page (from /lasso/doc/{id}/meta).
+   * These are required to scale between PDF canvas pixels and server OCR coordinates.
+   */
   serverW: number;
   serverH: number;
-  boxes: Box[];
+
+  /** Boxes to draw (typically already filtered by page, but we re-check page for safety). */
+  boxes: BoxLike[];
+
+  /** Whether to render the bounding boxes overlay. */
   showBoxes: boolean;
+
+  /** Enable lasso mode (drag to draw). Emits onLassoDone with server-space rect. */
   lasso: boolean;
 
-  onBoxClick?: (box: Box) => void;
-  onLassoDone?: (rectServer: Rect) => void;
+  /** Optional: visually mark a selected box by id (or synthetic id) */
+  selectedBoxId?: string | null;
+
+  /** When a box is clicked */
+  onBoxClick?: (box: BoxLike) => void;
+
+  /** When a lasso drag completes (rect is in SERVER coordinates, top-left origin) */
+  onLassoDone?: (rect: RectServer) => void;
 };
 
 export default function PdfCanvas({
-  docUrl, page, serverW, serverH, boxes, showBoxes, lasso, onBoxClick, onLassoDone
+  docUrl,
+  page,
+  serverW,
+  serverH,
+  boxes,
+  showBoxes,
+  lasso,
+  selectedBoxId,
+  onBoxClick,
+  onLassoDone,
 }: Props) {
-  const canvasRef = useRef<HTMLCanvasElement|null>(null);
-  const overlayRef = useRef<SVGSVGElement|null>(null);
-  const pdfRef = useRef<PDFDocumentProxy|null>(null);
-  const scaleRef = useRef<{sx:number; sy:number}>({ sx:1, sy:1 });
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const overlayRef = useRef<SVGSVGElement | null>(null);
+  const pdfRef = useRef<PDFDocumentProxy | null>(null);
+  const lastViewportSize = useRef<{ w: number; h: number }>({ w: 1, h: 1 });
+  const scaleRef = useRef<{ sx: number; sy: number }>({ sx: 1, sy: 1 });
 
-  // load doc once
+  // Load the PDF once per docUrl
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const doc = await getDocument(docUrl).promise;
       if (cancelled) return;
       pdfRef.current = doc;
-      await render();
-    })().catch(()=>{});
-    return () => { cancelled = true; };
+      await renderPage();
+    })().catch(() => {});
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [docUrl]);
 
-  // re-render when inputs change
-  useEffect(() => { render().catch(()=>{}); }, [page, boxes, showBoxes, lasso, serverW, serverH]);
+  // Re-render when inputs change
+  useEffect(() => {
+    renderPage().catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, showBoxes, boxes, selectedBoxId, lasso, serverW, serverH]);
 
-  async function render() {
+  async function renderPage() {
     if (!pdfRef.current || !canvasRef.current || !overlayRef.current) return;
     const pdf = pdfRef.current;
-    const p: PDFPageProxy = await pdf.getPage(page);
-    const viewport = p.getViewport({ scale: 1.5 }); // any scale; we compute mapping
-    const cvs = canvasRef.current, ctx = cvs.getContext("2d")!;
-    cvs.width = viewport.width; cvs.height = viewport.height;
-    await p.render({ canvasContext: ctx, viewport }).promise;
+    const pg: PDFPageProxy = await pdf.getPage(page);
 
+    // Choose a canvas scale. 1.5 is a good compromise of sharpness/perf.
+    const viewport = pg.getViewport({ scale: 1.5 });
+    lastViewportSize.current = { w: viewport.width, h: viewport.height };
+
+    // Render canvas
+    const cvs = canvasRef.current;
+    const ctx = cvs.getContext("2d")!;
+    cvs.width = viewport.width;
+    cvs.height = viewport.height;
+    await pg.render({ canvasContext: ctx, viewport }).promise;
+
+    // Compute scale factors from server-space → canvas-space
     const sx = viewport.width / Math.max(1, serverW);
     const sy = viewport.height / Math.max(1, serverH);
     scaleRef.current = { sx, sy };
 
+    // Prepare overlay SVG
     const svg = overlayRef.current;
     svg.setAttribute("viewBox", `0 0 ${viewport.width} ${viewport.height}`);
-    svg.setAttribute("width", `${viewport.width}`);
-    svg.setAttribute("height", `${viewport.height}`);
-    svg.innerHTML = "";
+    svg.setAttribute("width", String(viewport.width));
+    svg.setAttribute("height", String(viewport.height));
+    // Clear previous children
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
 
-    if (showBoxes) {
-      boxes.forEach((b) => {
-        if (b.page !== page) return;
-        const r = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-        r.setAttribute("x", String(b.x0 * sx));
-        r.setAttribute("y", String(b.y0 * sy));         // Tesseract coords are top-left origin
-        r.setAttribute("width", String((b.x1 - b.x0) * sx));
-        r.setAttribute("height", String((b.y1 - b.y0) * sy));
-        r.setAttribute("class", "bbox-rect");
-        r.addEventListener("click", () => onBoxClick?.(b));
-        svg.appendChild(r);
-      });
-    }
+    if (showBoxes) drawBoxes(svg, sx, sy);
   }
 
-  // lasso interactions
-  function toSvg(e: React.MouseEvent<SVGSVGElement>) {
+  /** Draw all boxes + numeric labels. */
+  function drawBoxes(svg: SVGSVGElement, sx: number, sy: number) {
+    // Use a fragment for perf
+    const frag = document.createDocumentFragment();
+    let drawIdx = 0;
+
+    for (let i = 0; i < boxes.length; i++) {
+      const b = boxes[i];
+      if (b.page !== page) continue;
+
+      const gx = b.x0 * sx;
+      const gy = b.y0 * sy; // top-left origin stays top-left
+      const gw = (b.x1 - b.x0) * sx;
+      const gh = (b.y1 - b.y0) * sy;
+
+      const syntheticId = b.id || `${b.page}:${b.x0}:${b.y0}:${i}`;
+      const selected = selectedBoxId && syntheticId === selectedBoxId;
+
+      // Rectangle
+      const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      rect.setAttribute("x", String(gx));
+      rect.setAttribute("y", String(gy));
+      rect.setAttribute("width", String(gw));
+      rect.setAttribute("height", String(gh));
+      rect.setAttribute("class", selected ? "bbox-rect selected" : "bbox-rect");
+      rect.dataset["boxId"] = syntheticId;
+      rect.addEventListener("click", (e) => {
+        e.stopPropagation();
+        onBoxClick?.(b);
+      });
+      frag.appendChild(rect);
+
+      // Numeric label background
+      const tag = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      tag.setAttribute("x", String(Math.max(gx - 1, 0)));
+      tag.setAttribute("y", String(Math.max(gy - 14, 0)));
+      tag.setAttribute("width", "16");
+      tag.setAttribute("height", "14");
+      tag.setAttribute("rx", "2");
+      tag.setAttribute("ry", "2");
+      tag.setAttribute("class", "box-tag");
+      frag.appendChild(tag);
+
+      // Numeric label text
+      const txt = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      txt.setAttribute("x", String(Math.max(gx - 1, 0) + 8));
+      txt.setAttribute("y", String(Math.max(gy - 14, 0) + 8));
+      txt.setAttribute("class", "box-tag-text");
+      txt.textContent = String(++drawIdx);
+      frag.appendChild(txt);
+    }
+
+    svg.appendChild(frag);
+  }
+
+  // ---- Lasso handling (SVG overlay coords -> server coords) ----
+  function svgPointFromClient(e: React.MouseEvent<SVGSVGElement>) {
     const svg = overlayRef.current!;
-    const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
-    const m = svg.getScreenCTM(); const p = m ? pt.matrixTransform(m.inverse()) : ({ x:0, y:0 } as any);
+    const pt = svg.createSVGPoint();
+    pt.x = e.clientX;
+    pt.y = e.clientY;
+    const m = svg.getScreenCTM();
+    const p = m ? pt.matrixTransform(m.inverse()) : ({ x: 0, y: 0 } as any);
     return { x: p.x as number, y: p.y as number };
   }
-  function onDown(e: React.MouseEvent<SVGSVGElement>) {
+
+  function onMouseDown(e: React.MouseEvent<SVGSVGElement>) {
     if (!lasso) return;
-    const { x, y } = toSvg(e);
-    overlayRef.current!.dataset["sx"] = String(x);
-    overlayRef.current!.dataset["sy"] = String(y);
+    const { x, y } = svgPointFromClient(e);
+    const svg = overlayRef.current!;
+    svg.dataset["sx"] = String(x);
+    svg.dataset["sy"] = String(y);
+
+    // temp drawing rect
     const tmp = document.createElementNS("http://www.w3.org/2000/svg", "rect");
     tmp.setAttribute("id", "__lasso__");
     tmp.setAttribute("class", "bbox-rect drawing");
-    tmp.setAttribute("x", String(x)); tmp.setAttribute("y", String(y));
-    tmp.setAttribute("width","0"); tmp.setAttribute("height","0");
-    overlayRef.current!.appendChild(tmp);
+    tmp.setAttribute("x", String(x));
+    tmp.setAttribute("y", String(y));
+    tmp.setAttribute("width", "0");
+    tmp.setAttribute("height", "0");
+    svg.appendChild(tmp);
   }
-  function onMove(e: React.MouseEvent<SVGSVGElement>) {
+
+  function onMouseMove(e: React.MouseEvent<SVGSVGElement>) {
     if (!lasso) return;
-    const sx = Number(overlayRef.current!.dataset["sx"]||NaN);
-    const sy = Number(overlayRef.current!.dataset["sy"]||NaN);
-    if (Number.isNaN(sx) || Number.isNaN(sy)) return;
-    const { x, y } = toSvg(e);
-    const x0 = Math.min(sx,x), y0 = Math.min(sy,y), x1 = Math.max(sx,x), y1 = Math.max(sy,y);
-    const tmp = overlayRef.current!.querySelector("#__lasso__") as SVGRectElement | null;
-    if (tmp) { tmp.setAttribute("x", String(x0)); tmp.setAttribute("y", String(y0)); tmp.setAttribute("width", String(x1-x0)); tmp.setAttribute("height", String(y1-y0)); }
-  }
-  function onUp() {
-    if (!lasso) return;
-    const sx = Number(overlayRef.current!.dataset["sx"]||NaN);
-    const sy = Number(overlayRef.current!.dataset["sy"]||NaN);
-    const tmp = overlayRef.current!.querySelector("#__lasso__"); if (tmp) tmp.remove();
-    overlayRef.current!.dataset["sx"]=""; overlayRef.current!.dataset["sy"]="";
+    const svg = overlayRef.current!;
+    const sx = Number(svg.dataset["sx"] || NaN);
+    const sy = Number(svg.dataset["sy"] || NaN);
     if (Number.isNaN(sx) || Number.isNaN(sy)) return;
 
-    // Convert to server coordinate space (top-left origin)
-    const ex = Number((tmp as any)?.getAttribute?.("x") ?? sx);
-    const ey = Number((tmp as any)?.getAttribute?.("y") ?? sy);
+    const { x, y } = svgPointFromClient(e);
+    const x0 = Math.min(sx, x), y0 = Math.min(sy, y);
+    const x1 = Math.max(sx, x), y1 = Math.max(sy, y);
+
+    const tmp = svg.querySelector("#__lasso__") as SVGRectElement | null;
+    if (tmp) {
+      tmp.setAttribute("x", String(x0));
+      tmp.setAttribute("y", String(y0));
+      tmp.setAttribute("width", String(x1 - x0));
+      tmp.setAttribute("height", String(y1 - y0));
+    }
+  }
+
+  function onMouseUp() {
+    if (!lasso) return;
+    const svg = overlayRef.current!;
+    const tmp = svg.querySelector("#__lasso__") as SVGRectElement | null;
+
+    const vx = lastViewportSize.current.w;
+    const vy = lastViewportSize.current.h;
+    const { sx, sy } = scaleRef.current; // canvas pixels per server px
+
+    // Clean up draw state
+    const sxData = Number(svg.dataset["sx"] || NaN);
+    const syData = Number(svg.dataset["sy"] || NaN);
+    svg.dataset["sx"] = "";
+    svg.dataset["sy"] = "";
+    if (tmp) tmp.remove();
+
+    if (Number.isNaN(sxData) || Number.isNaN(syData)) return;
+
+    // Compute final rect in SVG/canvas space
+    // We stored the final rect in the element; if it doesn't exist, use a single-point selection.
+    const ex = Number((tmp as any)?.getAttribute?.("x") ?? sxData);
+    const ey = Number((tmp as any)?.getAttribute?.("y") ?? syData);
     const ew = Number((tmp as any)?.getAttribute?.("width") ?? 0);
     const eh = Number((tmp as any)?.getAttribute?.("height") ?? 0);
-    const { sx:scx, sy:scy } = scaleRef.current;
-    const rect: Rect = { x0: Math.round(ex / scx), y0: Math.round(ey / scy), x1: Math.round((ex+ew)/scx), y1: Math.round((ey+eh)/scy) };
-    onLassoDone?.(rect);
+
+    // Convert canvas/svg px -> server px
+    let X0 = Math.round(ex / sx),
+      Y0 = Math.round(ey / sy),
+      X1 = Math.round((ex + ew) / sx),
+      Y1 = Math.round((ey + eh) / sy);
+
+    // Normalize and clamp
+    if (X0 > X1) [X0, X1] = [X1, X0];
+    if (Y0 > Y1) [Y0, Y1] = [Y1, Y0];
+    X0 = clamp(X0, 0, Math.max(0, serverW - 1));
+    Y0 = clamp(Y0, 0, Math.max(0, serverH - 1));
+    X1 = clamp(X1, 0, Math.max(0, serverW - 1));
+    Y1 = clamp(Y1, 0, Math.max(0, serverH - 1));
+
+    // Ignore degenerate rects
+    if (Math.abs(X1 - X0) < 2 || Math.abs(Y1 - Y0) < 2) return;
+
+    onLassoDone?.({ x0: X0, y0: Y0, x1: X1, y1: Y1 });
+  }
+
+  function clamp(n: number, lo: number, hi: number) {
+    return Math.min(hi, Math.max(lo, n));
   }
 
   return (
     <div className="pdf-stage">
-      <canvas ref={canvasRef}/>
+      <canvas ref={canvasRef} />
       <svg
         ref={overlayRef}
         className={lasso ? "overlay crosshair" : "overlay"}
-        onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp}
+        onMouseDown={onMouseDown}
+        onMouseMove={onMouseMove}
+        onMouseUp={onMouseUp}
       />
     </div>
   );
