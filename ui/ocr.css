@@ -1,4 +1,4 @@
-/* ==========================================================================
+mi/* ==========================================================================
    EDIP OCR / Lasso Workbench Styles
    File: src/components/ocr.css
    ==========================================================================
@@ -425,3 +425,19 @@ button:disabled {
 @media (prefers-color-scheme: dark) {
   .modal-card { background: #0f172a; }
 }
+
+/* Pink edit box (field-level) */
+.overlay .bbox-rect.drawing {
+  fill: rgba(0,0,0,.06);
+  stroke: rgba(0,0,0,.5);
+  stroke-dasharray: 4 3;
+}
+
+.edit-handle { cursor: pointer; }
+
+@media (prefers-color-scheme: dark) {
+  /* already good; pink shows well on dark */
+}
+
+
+
