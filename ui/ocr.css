@@ -399,3 +399,29 @@ button:disabled {
   thead th { background: #0b1220; border-bottom-color: #1f2937; }
   th, td { border-bottom-color: #1f2937; }
 }
+
+/* === Modal (portal) === */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 72px;        /* keep clear of top header */
+  z-index: 100000;          /* above app header */
+}
+
+.modal-card {
+  background: #fff;
+  width: min(1100px, 96vw);
+  max-height: 86vh;
+  overflow: auto;
+  border-radius: 12px;
+  padding: 14px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.30);
+  border: 1px solid var(--border);
+}
+@media (prefers-color-scheme: dark) {
+  .modal-card { background: #0f172a; }
+}

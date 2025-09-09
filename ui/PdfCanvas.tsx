@@ -1,10 +1,10 @@
 // File: src/components/lasso/PdfCanvas.tsx
 import React, { useEffect, useRef } from "react";
+// TOP OF FILE: replace the worker wiring
 import { GlobalWorkerOptions, getDocument, type PDFDocumentProxy, type PDFPageProxy } from "pdfjs-dist";
-import pdfjsWorker from "pdfjs-dist/build/pdf.worker.min?url";
+// Use vite-friendly worker path
+GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.js", import.meta.url).toString();
 
-// Set the worker (vite/esbuild compatible)
-GlobalWorkerOptions.workerSrc = pdfjsWorker as string;
 
 /** Minimal box shape expected from the server. */
 type BoxLike = {
@@ -88,6 +88,11 @@ export default function PdfCanvas({
     renderPage().catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, showBoxes, boxes, selectedBoxId, lasso, serverW, serverH]);
+
+  // Repaint when the number of boxes or server dims change (first-load fix)
+  useEffect(() => {
+    if (pdfRef.current) { renderPage().catch(()=>{}); }
+  }, [boxes.length, serverW, serverH]); // keeps first-load boxes from requiring a toggle
 
   async function renderPage() {
     if (!pdfRef.current || !canvasRef.current || !overlayRef.current) return;

@@ -21,8 +21,9 @@ export type PromCatalog = { doctype:string; version:string; fields:Array<{ key:s
 const API_BASE =
   (typeof window !== "undefined" && (window as any).__API_BASE__) ||
   (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_BASE) ||
-  "http://localhost:8000";
+  "http://localhost:8080";
 export const API = API_BASE;
+
 
 const qs = (o:Record<string,any>) => new URLSearchParams(Object.entries(o).filter(([,v]) => v!==undefined && v!==null).map(([k,v])=>[k,String(v)])).toString();
 async function j<T=any>(url:string, init?:RequestInit):Promise<T>{
