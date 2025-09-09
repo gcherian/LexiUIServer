@@ -73,3 +73,22 @@ export async function bindField(doc_id:string, key:string, page:number, rect:Rec
     body: JSON.stringify({ doc_id, key, page, rect })
   });
 }
+
+export async function ocrPreview(doc_id: string, page: number, rect: {x0:number;y0:number;x1:number;y1:number}) {
+  const r = await fetch(`${API}/lasso/lasso`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ doc_id, page, ...rect })
+  });
+  if (!r.ok) throw new Error(await r.text());
+  // NEW: include debug fields from server
+  return r.json() as Promise<{
+    text: string;
+    rect_used: { page:number; x0:number; y0:number; x1:number; y1:number };
+    page_size: { width:number; height:number };
+    crop_url?: string;
+  }>;
+}
+
+
+
