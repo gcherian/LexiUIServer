@@ -112,7 +112,6 @@ export default function BindModal({
               </label>
               <button className="btn toggle" onClick={previewOCR} disabled={!rect}>Preview OCR</button>
             </div>
-
             <PdfCanvas
               docUrl={docUrl}
               page={page}
@@ -121,11 +120,23 @@ export default function BindModal({
               boxes={box ? [box] : []}
               showBoxes={!!box}
               lasso={modeLasso}
-              onLassoDone={(r) => {
+              onLassoDone={async (r) => {
                 setRect(r);
-                setModeLasso(false); // auto-exit lasso after drawing
+                setModeLasso(false);
+            
+                try {
+                  const res = await ocrPreview(docId, page, r);
+                  const text = (res?.text || "").trim();
+                  setValue(text);
+                  // quick demo feedback:
+                  alert(text ? `OCR result:\n\n${text}` : "No text detected in selection.");
+                } catch (e) {
+                  alert("OCR failed. Please try again.");
+                }
               }}
             />
+
+
           </div>
 
           {/* Right: form */}
