@@ -9,4 +9,9 @@ const routes: TemplateRoute[] = [
   }
 ];
 
+import FieldLevelEditor from "../components/fieldedit/FieldLevelEditor";
+
+// ...
+{ path: "/field_editor", element: <FieldLevelEditor /> },
+
 export default routes;
