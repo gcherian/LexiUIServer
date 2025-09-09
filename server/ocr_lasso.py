@@ -368,63 +368,71 @@ async def semantic_search(doc_id: str = Query(...), q: str = Query(...), topk: i
     res = semantic_search_pages(doc_id, q, topk)
     return {"results": [{"page": p, "score": s} for p, s in res]}
 
-# ---- Robust lasso OCR ----
 @router.post("/lasso")
 async def lasso_crop(req: LassoReq):
     mp = meta_path(req.doc_id)
-    if not mp.exists(): raise HTTPException(404, "Meta missing")
+    if not mp.exists():
+        raise HTTPException(404, "Meta missing")
     meta = json.loads(mp.read_text())
     dpi = meta.get("params", {}).get("dpi", 260)
 
     pdf = pdfium.PdfDocument(str(pdf_path(req.doc_id)))
     if req.page < 1 or req.page > len(pdf):
         raise HTTPException(400, f"Page out of range: {req.page}")
+
+    # render the page at OCR resolution (same as when tokens were produced)
     pil = pdf[req.page - 1].render(scale=(dpi / 72)).to_pil()
+    gray = ImageOps.autocontrast(pil.convert("L"))
 
-    def prep(img: Image.Image) -> Image.Image:
-        return ImageOps.autocontrast(img.convert("L"))
-
-    img = prep(pil)
-
-    base_pad = 6
+    # normalize incoming rect and add a light pad (small so we don't drift)
     x0, y0, x1, y1 = float(req.x0), float(req.y0), float(req.x1), float(req.y1)
     if x0 > x1: x0, x1 = x1, x0
     if y0 > y1: y0, y1 = y1, y0
-    x0, y0 = max(0, int(x0 - base_pad)), max(0, int(y0 - base_pad))
-    x1, y1 = min(img.width - 1, int(x1 + base_pad)), min(img.height - 1, int(y1 + base_pad))
+    PAD = 4
+    X0 = max(0, int(round(x0)) - PAD)
+    Y0 = max(0, int(round(y0)) - PAD)
+    X1 = min(gray.width - 1, int(round(x1)) + PAD)
+    Y1 = min(gray.height - 1, int(round(y1)) + PAD)
 
-    crop = img.crop((x0, y0, x1, y1))
-    cw, ch = crop.size
-    if cw < 180 or ch < 52:
-        scale = 3 if max(cw, ch) < 70 else 2
+    crop = gray.crop((X0, Y0, X1, Y1))
+
+    # upscale small crops a bit for Tesseract readability
+    if crop.width < 160 or crop.height < 40:
+        scale = 3 if max(crop.width, crop.height) < 70 else 2
         crop = crop.resize((crop.width * scale, crop.height * scale), Image.BICUBIC)
 
     def ocr_try(psm: int, im: Image.Image) -> str:
         cfg = f"--oem 1 --psm {psm} -c preserve_interword_spaces=1"
         return pytesseract.image_to_string(
-            im, lang=meta.get("params",{}).get("lang","eng"), config=cfg
+            im,
+            lang=meta.get("params", {}).get("lang", "eng"),
+            config=cfg,
         ).strip()
 
-    def score_text(s: str): return (len(s), s.count(" "), -sum(1 for ch in s if not ch.isprintable()))
+    # try a couple of layouts
+    candidates = []
+    for p in (6, 7, 11):
+        s = ocr_try(p, crop)
+        candidates.append((len(s), s.count(" "), s))
 
-    cands = [(score_text(t := ocr_try(p, crop)), t) for p in (6, 7, 11)]
-    cands.sort(reverse=True)
-    best = cands[0][1]
+    # pick the longest, more space-rich
+    candidates.sort(reverse=True)
+    best = candidates[0][2] if candidates else ""
 
-    if len(best) <= 2:
-        inflate = 18
-        X0 = max(0, x0 - inflate); Y0 = max(0, y0 - inflate)
-        X1 = min(img.width - 1, x1 + inflate); Y1 = min(img.height - 1, y1 + inflate)
-        bigger = img.crop((X0, Y0, X1, Y1))
-        bw, bh = bigger.size
-        if bw < 220 or bh < 70:
-            bigger = bigger.resize((bw * 2, bh * 2), Image.BICUBIC)
-        retry = [(score_text(t := ocr_try(p, bigger)), t) for p in (6, 7, 11)]
-        retry.sort(reverse=True)
-        if len(retry[0][1]) > len(best):
-            best = retry[0][1]
+    # save the actual crop as a debug image you can view from the UI
+    dbg_name = f"debug_crop_{int(time.time())}.png"
+    dbg_path = doc_dir(req.doc_id) / dbg_name
+    try:
+        crop.save(dbg_path, "PNG")
+    except Exception:
+        pass
 
-    return {"text": best}
+    return {
+        "text": best,
+        "rect_used": {"page": req.page, "x0": X0, "y0": Y0, "x1": X1, "y1": Y1},
+        "page_size": {"width": gray.width, "height": gray.height},
+        "crop_url": f"/data/{req.doc_id}/{dbg_name}",
+    }
 
 # ---- PROM ----
 @router.get("/prom")
