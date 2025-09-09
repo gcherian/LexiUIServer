@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import "../ocr.css";
-import PdfEditCanvas, { type EditRect } from "./PdfEditCanvas";
-import type { Box as TokenBox } from "../../../lib/api";
+import PdfEditCanvas, { type EditRect, type TokenBox } from "./PdfEditCanvas";
 
 import {
   API,
@@ -12,29 +11,20 @@ import {
   getProm,
   setDoctype,
   getFields,
-  ecmExtract,
   putFields,
+  ecmExtract,
   bindField,
   ocrPreview,
   docIdFromUrl,
   type FieldDocState,
   type PromCatalog,
-  type Box as TokenBox,
 } from "../../../lib/api";
 
-/* ========================================================================================
-   Small helpers
-======================================================================================== */
-function isEditableForCatalogKey(cat: PromCatalog | null, key: string): boolean {
-  if (!cat) return true;
-  const f = cat.fields.find((x) => x.key === key);
-  if (!f) return true;
-  // enums are treated as locked (non-editable)
-  const opts = (f as any)["enum"] as string[] | undefined;
-  if (Array.isArray(opts) && opts.length > 0) return false;
-  const t = (f as any).type ?? "string";
-  return t === "string";
-}
+/* ----------------------- helpers & types ----------------------- */
+
+type LocateRect = { x0: number; y0: number; x1: number; y1: number };
+type LocateHit = { page: number; rect: LocateRect; score: number };
+type Candidate = { score: number; page: number; span: TokenBox[] };
 
 function norm(s: string): string {
   return (s || "")
@@ -86,14 +76,9 @@ function linePenalty(span: TokenBox[]) {
   const avg = hs.reduce((a, b) => a + b, 0) / Math.max(1, hs.length);
   return Math.max(0, yspread - avg * 0.6) / Math.max(1, avg);
 }
-
-
-type Candidate = { score: number; page: number; span: TokenBox[] };
-
-function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 8) {
+function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 8): LocateHit | null {
   const value = valueRaw?.trim();
   if (!value) return null;
-
   const looksNumeric = /^[\s\-$€£₹,.\d/]+$/.test(value);
   const target = looksNumeric ? normKeepDigits(value) : norm(value);
   if (!target) return null;
@@ -139,81 +124,85 @@ function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 
   return { page: best.page, rect, score: best.score };
 }
 
-/* ========================================================================================
-   Component
-======================================================================================== */
+function isEditableForCatalogKey(cat: PromCatalog | null, key: string): boolean {
+  if (!cat) return true;
+  const f = cat.fields.find((x) => x.key === key);
+  if (!f) return true;
+  const opts = (f as any)["enum"] as string[] | undefined;
+  if (Array.isArray(opts) && opts.length > 0) return false;
+  const t = (f as any).type ?? "string";
+  return t === "string";
+}
+
+/* ----------------------- component ----------------------------- */
+
 export default function FieldLevelEditor() {
-  // document
+  // Document/page
   const [docUrl, setDocUrl] = useState("");
   const [docId, setDocId] = useState("");
   const [meta, setMeta] = useState<{ w: number; h: number }[]>([]);
   const [page, setPage] = useState(1);
+
   const [tokens, setTokens] = useState<TokenBox[]>([]);
-  const [loading, setLoading] = useState(false);
+  const tokensThisPage = useMemo(() => tokens.filter((t) => t.page === page), [tokens, page]);
 
-  // editor
-  const [rect, setRect] = useState<EditRect | null>(null);
   const [showBoxes, setShowBoxes] = useState(true);
+  const [lastCrop, setLastCrop] = useState<{ url?: string; text?: string } | null>(null);
 
-  // PROM / fields
+  // Rect (pink)
+  const [rect, setRect] = useState<EditRect | null>(null);
+
+  // PROM + field state
   const [proms, setProms] = useState<Array<{ doctype: string; file: string }>>([]);
   const [doctype, setDoctypeSel] = useState("");
   const [catalog, setCatalog] = useState<PromCatalog | null>(null);
   const [fields, setFields] = useState<FieldDocState | null>(null);
-  const [focusedKey, setFocusedKey] = useState<string>("");
+  const [focusedKey, setFocusedKey] = useState("");
 
-  // layout (draggable divider)
+  // Split sizing
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const [pdfPct, setPdfPct] = useState(68);
+  const [pdfPct, setPdfPct] = useState(70);
   const draggingSplit = useRef(false);
 
-  // debug preview of OCR crop
-  const [lastCrop, setLastCrop] = useState<{ url?: string; text?: string } | null>(null);
-
-  /* ---------- upload / paste ---------- */
+  // Upload
   async function onUpload(ev: React.ChangeEvent<HTMLInputElement>) {
     const f = ev.target.files?.[0];
     if (!f) return;
-    setLoading(true);
     try {
       const res = await uploadPdf(f);
-      await bootstrapFromDocId(res.doc_id, res.annotated_tokens_url);
+      await bootstrap(res.doc_id, res.annotated_tokens_url);
     } finally {
-      setLoading(false);
       (ev.target as HTMLInputElement).value = "";
     }
   }
 
-  async function bootstrapFromDocId(id: string, url: string) {
-    setDocUrl(url);
+  async function bootstrap(id: string, url: string) {
     setDocId(id);
+    setDocUrl(url);
     const m = await getMeta(id);
     setMeta(m.pages.map((p) => ({ w: p.width, h: p.height })));
     const b = await getBoxes(id);
     setTokens(b as any);
     setPage(1);
+    setRect(null);
     setFields(null);
     setCatalog(null);
     setDoctypeSel("");
-    setRect(null);
     setFocusedKey("");
     setLastCrop(null);
   }
 
+  // Paste /data/{doc}/original.pdf
   useEffect(() => {
     const id = docIdFromUrl(docUrl);
     if (!id) return;
-    setLoading(true);
     (async () => {
-      try {
-        await bootstrapFromDocId(id, docUrl);
-      } finally {
-        setLoading(false);
-      }
+      await bootstrap(id, docUrl);
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [docUrl]);
 
-  // PROM list
+  // PROM list once
   useEffect(() => {
     (async () => {
       try {
@@ -224,42 +213,39 @@ export default function FieldLevelEditor() {
     })();
   }, []);
 
-  // Doctype
+  // Select doctype
   async function onSelectDoctype(dt: string) {
-    const val = dt || "";
-    setDoctypeSel(val);
+    setDoctypeSel(dt);
     if (!docId) return;
-    await setDoctype(docId, val);
+    await setDoctype(docId, dt);
     try {
       setFields(await getFields(docId));
     } catch {
-      setFields({ doc_id: docId, doctype: val, fields: [], audit: [] });
+      // seed
+      const cat = await getProm(dt);
+      setCatalog(cat);
+      setFields({
+        doc_id: docId,
+        doctype: dt,
+        fields: cat.fields.map((f) => ({ key: f.key, value: "", source: "user", confidence: 0 })),
+        audit: [],
+      });
+      return;
     }
-    try {
-      setCatalog(await getProm(val));
-    } catch {
-      setCatalog(null);
-    }
+    setCatalog(await getProm(dt));
   }
 
-  // Extract via ECM mock
+  // Extract via mock
   async function onExtract() {
     if (!docId || !doctype) return;
     const st = await ecmExtract(docId, doctype);
     setFields(st);
   }
 
-  // Save all fields (on click)
-  async function saveAllFields() {
-    if (!fields) return;
-    setFields(await putFields(fields.doc_id, fields));
-  }
-
-  // Focus a field -> show saved bbox or auto-locate
+  // Focus a field to show its pink box / auto locate
   function focusKey(k: string) {
     setFocusedKey(k);
     const f = fields?.fields.find((x) => x.key === k);
-    // explicitly any, to avoid TS narrowing to 'never'
     const bbox: any = f && (f as any).bbox ? (f as any).bbox : null;
 
     if (bbox && Number.isFinite(Number(bbox.page))) {
@@ -277,35 +263,37 @@ export default function FieldLevelEditor() {
 
     const value = (f?.value || "").toString();
     if (value) {
-      const found = autoLocateByValue(value, tokens);
+      const found: LocateHit | null = autoLocateByValue(value, tokens);
       if (found) {
         setPage(found.page);
-        const rr: EditRect = { page: found.page, ...found.rect };
-        setRect(rr);
+        setRect({ page: found.page, ...found.rect });
         return;
       }
     }
     setRect(null);
   }
 
-  // OCR + bind on commit
+  async function saveAllFields() {
+    if (!fields) return;
+    setFields(await putFields(fields.doc_id, fields));
+  }
+
+  // Lasso commit -> OCR -> update + bind
   async function onRectCommitted(rr: EditRect) {
     if (!focusedKey) {
-      alert("Select a field on the right, then adjust the pink box on the left.");
+      alert("Select a field on the right first.");
       return;
     }
-    const editable = isEditableForCatalogKey(catalog, focusedKey);
-    if (!editable) {
+    if (!isEditableForCatalogKey(catalog, focusedKey)) {
       alert("This field is read-only.");
       return;
     }
     try {
       const res = await ocrPreview(docId, rr.page, rr);
       const text = (res?.text || "").trim();
-
       setLastCrop({ url: res?.crop_url, text });
 
-      // optimistic UI update
+      // live update
       setFields((prev) =>
         prev
           ? {
@@ -325,7 +313,7 @@ export default function FieldLevelEditor() {
           : prev
       );
 
-      // persist to server (bind)
+      // persist
       const st = await bindField(docId, focusedKey, rr.page, rr);
       setFields(st);
       setRect(rr);
@@ -334,7 +322,7 @@ export default function FieldLevelEditor() {
     }
   }
 
-  /* ---------- draggable divider ---------- */
+  // Split: drag divider
   function onDividerMouseDown(e: React.MouseEvent) {
     e.preventDefault();
     draggingSplit.current = true;
@@ -346,7 +334,7 @@ export default function FieldLevelEditor() {
     if (!draggingSplit.current || !containerRef.current) return;
     const r = containerRef.current.getBoundingClientRect();
     const x = e.clientX - r.left;
-    const pct = Math.max(40, Math.min(90, (x / r.width) * 100));
+    const pct = Math.max(45, Math.min(90, (x / r.width) * 100));
     setPdfPct(Math.round(pct));
   }
   function onDividerUp() {
@@ -357,7 +345,6 @@ export default function FieldLevelEditor() {
 
   const serverW = meta[page - 1]?.w || 1;
   const serverH = meta[page - 1]?.h || 1;
-  const tokensThisPage = useMemo(() => tokens.filter((t) => t.page === page), [tokens, page]);
 
   return (
     <div className="workbench">
@@ -392,8 +379,8 @@ export default function FieldLevelEditor() {
                   Next
                 </button>
               </div>
+
               <PdfEditCanvas
-                key={`${docId}:${page}:${serverW}x${serverH}`}  // force clean remount on page/size change
                 docUrl={docUrl}
                 page={page}
                 serverW={serverW}
@@ -401,21 +388,17 @@ export default function FieldLevelEditor() {
                 tokens={tokensThisPage}
                 rect={rect}
                 showTokenBoxes={showBoxes}
-                editable={!!focusedKey && isEditableForCatalogKey(catalog, focusedKey)}
+                editable={!!focusedKey}
                 onRectChange={setRect}
                 onRectCommit={onRectCommitted}
               />
 
               {lastCrop?.url && (
-                <div style={{ display: "flex", gap: 12, alignItems: "flex-start", margin: "8px 8px 0 8px" }}>
-                  <img
-                    src={lastCrop.url}
-                    alt="last-ocr-crop"
-                    style={{ maxWidth: 220, border: "1px solid #e5e7eb", borderRadius: 4 }}
-                  />
-                  <div style={{ fontSize: 12 }}>
-                    <div style={{ fontWeight: 600, marginBottom: 4 }}>Last OCR</div>
-                    <div style={{ whiteSpace: "pre-wrap" }}>{lastCrop.text || ""}</div>
+                <div className="last-ocr">
+                  <img src={lastCrop.url} alt="last-crop" />
+                  <div className="caption">
+                    <div className="title">Last OCR</div>
+                    <pre>{lastCrop.text || ""}</pre>
                   </div>
                 </div>
               )}
@@ -428,7 +411,7 @@ export default function FieldLevelEditor() {
         {/* Divider */}
         <div className="wb-divider" onMouseDown={onDividerMouseDown} title="Drag to resize" />
 
-        {/* RIGHT: fields */}
+        {/* RIGHT: Fields */}
         <div className="wb-right" style={{ flexBasis: `${100 - pdfPct}%` }}>
           <div className="row">
             <label>Doctype</label>
@@ -445,7 +428,7 @@ export default function FieldLevelEditor() {
           <div className="row">
             <label>Actions</label>
             <div style={{ display: "flex", gap: 8 }}>
-              <button className="primary" onClick={onExtract} disabled={!doctype || !docId || loading}>
+              <button className="primary" onClick={onExtract} disabled={!doctype || !docId}>
                 Extract
               </button>
               <button onClick={saveAllFields} disabled={!fields}>
@@ -457,6 +440,7 @@ export default function FieldLevelEditor() {
           <div className="section-title" style={{ marginTop: 12 }}>
             Fields
           </div>
+
           {!fields || fields.fields.length === 0 ? (
             <div className="placeholder">
               Choose a doctype and click <b>Extract</b>.
@@ -501,15 +485,13 @@ export default function FieldLevelEditor() {
                                   : s
                               )
                             }
-                            onBlur={saveAllFields}
                             disabled={!editable}
+                            onBlur={saveAllFields}
                           />
                         </td>
                         <td>{f.source || ""}</td>
                         <td>{f.confidence ? f.confidence.toFixed(2) : ""}</td>
-                        <td>
-                          {editable ? <span className="badge">Editable</span> : <span className="badge warn">Locked</span>}
-                        </td>
+                        <td>{editable ? <span className="badge">Editable</span> : <span className="badge warn">Locked</span>}</td>
                       </tr>
                     );
                   })}
@@ -517,7 +499,8 @@ export default function FieldLevelEditor() {
               </table>
             </div>
           )}
-          <div className="hint">Select a field to see its pink box. Adjust it to re-OCR and update the value.</div>
+
+          <div className="hint">Select a field → lasso on the PDF → value updates & saves.</div>
         </div>
       </div>
     </div>

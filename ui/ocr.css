@@ -85,52 +85,201 @@ body {
 
 /* 3) Toolbar -------------------------------------------------------------- */
 
+
+/* toolbar */
 .wb-toolbar {
   display: flex;
   align-items: center;
-  gap: .5rem;
-  padding: .5rem .6rem;
-  border: 1px solid var(--border);
-  background: var(--panel);
-  border-radius: 10px;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #e5e7eb;
+  background: #fafafa;
+}
+.wb-toolbar .input {
+  flex: 1;
+  min-width: 220px;
+}
+.btn.toggle {
+  border: 1px solid #d1d5db;
+  padding: 2px 8px;
+  border-radius: 14px;
+  background: #fff;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.btn.toggle.active {
+  background: #eef2ff;
+  border-color: #6366f1;
+}
+.spacer { flex: 1; }
+.muted { color: #6b7280; font-size: 12px; }
+
+/* split */
+.wb-split {
+  display: flex;
+  height: calc(100vh - 110px);
+  min-height: 520px;
+}
+.wb-left {
+  position: relative;
+  overflow: hidden;
+  background: #0f172a; /* dark canvas backdrop */
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+}
+.wb-right {
+  overflow: auto;
+  padding: 12px;
+  background: #fff;
+}
+.wb-divider {
+  width: 6px;
+  background: linear-gradient(#e5e7eb, #d1d5db);
+  cursor: col-resize;
+}
+.wb-split.resizable .wb-divider:hover {
+  background: linear-gradient(#c7d2fe, #a5b4fc);
 }
 
-.wb-toolbar .spacer { flex: 1; }
+/* pdf stage */
+.pdf-stage {
+  position: relative;
+  margin: 8px;
+  background: #111827;
+  border-radius: 8px;
+  padding: 8px;
+  overflow: auto;
+  max-height: calc(100vh - 190px);
+}
+.pdf-stage canvas {
+  display: block;
+  background: #fff;
+  border-radius: 4px;
+}
 
+/* overlay boxes */
+.overlay .tok {
+  position: absolute;
+  border: 1px dashed rgba(255, 145, 0, 0.9);
+  background: rgba(255, 145, 0, 0.08);
+  pointer-events: none;
+}
+.overlay .pink {
+  position: absolute;
+  border: 2px solid #ec4899;
+  background: rgba(236, 72, 153, 0.12);
+  pointer-events: none;
+}
+.overlay .pink.live {
+  border-style: dashed;
+}
+
+/* page nav inline */
 .toolbar-inline {
   display: flex;
   align-items: center;
-  gap: .5rem;
-  margin-bottom: .5rem;
+  gap: 8px;
+  color: #e5e7eb;
+  padding: 6px 10px 0 10px;
+}
+.toolbar-inline .page-indicator {
+  font-size: 12px;
+  color: #cbd5e1;
 }
 
-.page-indicator { font-variant-numeric: tabular-nums; }
-
-
-/* 4) Panels (Left/Right) -------------------------------------------------- */
-
-.wb-left {
-  position: relative;
-  overflow: auto;
-  background: var(--panel-soft);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: .5rem;
-}
-
-.wb-right {
-  overflow: auto;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: .9rem;
-}
-
+/* placeholders & hints */
 .placeholder {
-  color: var(--muted);
-  font-style: italic;
-  padding: .5rem;
+  padding: 16px;
+  color: #6b7280;
+  font-size: 14px;
 }
+.hint {
+  margin-top: 8px;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+/* right table */
+.field-table-wrap {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.field-table-wrap table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.field-table-wrap thead th {
+  text-align: left;
+  padding: 8px;
+  background: #f8fafc;
+  border-bottom: 1px solid #e5e7eb;
+}
+.field-table-wrap tbody td {
+  padding: 6px 8px;
+  border-bottom: 1px solid #f1f5f9;
+}
+.field-table-wrap tbody tr.missing td {
+  background: #fff7ed;
+}
+.field-table-wrap input {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font: inherit;
+}
+
+.section-title {
+  font-weight: 700;
+  color: #111827;
+}
+
+/* badges */
+.badge {
+  display: inline-block;
+  background: #eef2ff;
+  color: #3730a3;
+  padding: 2px 8px;
+  border-radius: 14px;
+  font-size: 12px;
+}
+.badge.warn {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+/* last ocr preview */
+.last-ocr {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  margin: 10px 8px 0;
+}
+.last-ocr img {
+  max-width: 220px;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  background: #fff;
+}
+.last-ocr .caption .title {
+  font-weight: 600;
+  color: #e5e7eb;
+  margin-bottom: 4px;
+}
+.last-ocr .caption pre {
+  margin: 0;
+  padding: 6px 8px;
+  background: #0b1220;
+  color: #e5e7eb;
+  border-radius: 6px;
+  white-space: pre-wrap;
+}
+
 
 
 /* 5) PDF Stage + Overlays ------------------------------------------------- */
