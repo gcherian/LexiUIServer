@@ -82,13 +82,19 @@ function linePenalty(span: TokenBox[]) {
   const avg = hs.reduce((a, b) => a + b, 0) / Math.max(1, hs.length);
   return Math.max(0, yspread - avg * 0.6) / Math.max(1, avg);
 }
+
+// ---- replace your existing autoLocateByValue with this fully-typed version
+type Candidate = { score: number; page: number; span: TokenBox[] };
+
 function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 8) {
   const value = valueRaw?.trim();
   if (!value) return null;
+
   const looksNumeric = /^[\s\-$€£₹,.\d/]+$/.test(value);
   const target = looksNumeric ? normKeepDigits(value) : norm(value);
   if (!target) return null;
 
+  // group by page without iterating Map entries (keeps ES5 target happy)
   const byPage = new Map<number, TokenBox[]>();
   for (const t of allTokens) {
     const arr = byPage.get(t.page) || [];
@@ -97,7 +103,8 @@ function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 
   }
   byPage.forEach((arr) => arr.sort((a, b) => (a.y0 === b.y0 ? a.x0 - b.x0 : a.y0 - b.y0)));
 
-  let best: { score: number; page: number; span: TokenBox[] } | null = null;
+  let best: Candidate | null = null; // ✅ explicit, so it's never inferred as 'never'
+
   byPage.forEach((toks, pg) => {
     const n = toks.length;
     for (let i = 0; i < n; i++) {
@@ -108,11 +115,15 @@ function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 
         const txt = (t.text || "").trim();
         if (!txt) continue;
         span.push(t);
+
         accum = (accum ? accum + " " : "") + txt;
         const cand = looksNumeric ? normKeepDigits(accum) : norm(accum);
+
         if (target.length >= 2 && !cand.includes(target.slice(0, 2))) continue;
+
         const sim = levRatio(cand, target);
         if (sim < 0.6) continue;
+
         const score = sim - Math.min(0.25, linePenalty(span) * 0.12);
         if (!best || score > best.score) best = { score, page: pg, span: [...span] };
       }
@@ -120,7 +131,9 @@ function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 
   });
 
   if (!best) return null;
-  return { page: best.page, rect: unionRect(best.span), score: best.score };
+
+  const rect = unionRect(best.span);
+  return { page: best.page, rect, score: best.score };
 }
 /* ---------------------------------------- */
 
