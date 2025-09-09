@@ -2,12 +2,23 @@
 import React, { useEffect, useMemo, useState } from "react";
 import "../ocr.css";
 import {
-  API, uploadPdf, getMeta, getBoxes,
-  docIdFromUrl, docUrlFromId,
-  listProms, getProm, setDoctype, ecmExtract,
-  getFields, putFields,
-  type Box, type FieldDocState, type PromCatalog
-} from "../../lib/api";
+  API,
+  uploadPdf,
+  getMeta,
+  getBoxes,
+  docIdFromUrl,
+  // docUrlFromId, // ❌ unused and not exported in the new api.ts
+  listProms,
+  getProm,
+  setDoctype,
+  ecmExtract,
+  getFields,
+  putFields,
+  type Box,
+  type FieldDocState,
+  type PromCatalog,
+} from "../../../lib/api"; // ✅ api is three levels up
+
 import PdfCanvas from "./PdfCanvas";
 import BindModal from "./BindModal";
 
@@ -276,7 +287,7 @@ export default function OcrWorkbench() {
         page={page}
         serverW={meta[page - 1]?.w || 1}
         serverH={meta[page - 1]?.h || 1}
-        allKeys={catalog?.fields?.map((f) => f.key) || []}
+        allKeys={allKeys}
         box={modalFromBox}
         initialKey={state?.fields?.find((f) => !f.value)?.key || ""}
         onBound={(st) => setState(st)}

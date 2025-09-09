@@ -31,7 +31,7 @@ function isEditableForCatalogKey(cat: PromCatalog | null, key: string): boolean 
   return t === "string";
 }
 
-/* ---------------- Optional fuzzy locator (unchanged) ---------------- */
+/* ---- helpers for optional auto-locate ---- */
 function norm(s: string): string {
   return (s || "")
     .toLowerCase()
@@ -89,7 +89,6 @@ function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 
   const target = looksNumeric ? normKeepDigits(value) : norm(value);
   if (!target) return null;
 
-  // group by page without for..of(Map) to avoid ES2015 target requirement
   const byPage = new Map<number, TokenBox[]>();
   for (const t of allTokens) {
     const arr = byPage.get(t.page) || [];
@@ -123,7 +122,7 @@ function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 
   if (!best) return null;
   return { page: best.page, rect: unionRect(best.span), score: best.score };
 }
-/* -------------------------------------------------------------------- */
+/* ---------------------------------------- */
 
 export default function FieldLevelEditor() {
   // document
@@ -145,15 +144,15 @@ export default function FieldLevelEditor() {
   const [fields, setFields] = useState<FieldDocState | null>(null);
   const [focusedKey, setFocusedKey] = useState<string>("");
 
-  // Split layout (optional UI)
+  // layout (optional)
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [pdfPct, setPdfPct] = useState(68);
   const draggingSplit = useRef(false);
 
-  // Debug preview of last OCR crop
+  // debug preview
   const [lastCrop, setLastCrop] = useState<{ url?: string; text?: string } | null>(null);
 
-  // ---------- upload / paste ----------
+  /* ---------- upload / paste ---------- */
   async function onUpload(ev: React.ChangeEvent<HTMLInputElement>) {
     const f = ev.target.files?.[0];
     if (!f) return;
@@ -230,15 +229,13 @@ export default function FieldLevelEditor() {
     setFields(st);
   }
 
-  // Focus a field -> show pink box (bbox or auto-locate)
+  // Focus a field -> show saved bbox or auto-locate
   function focusKey(k: string) {
     setFocusedKey(k);
-
     const f = fields?.fields.find((x) => x.key === k);
 
-    // *** Explicitly type bbox to avoid "never" ***
-    const bbox: { page: number; x0: number; y0: number; x1: number; y1: number } | null | undefined =
-      f && (f as any).bbox ? (f as any).bbox : null;
+    // explicitly any, to avoid TS narrowing to 'never'
+    const bbox: any = f && (f as any).bbox ? (f as any).bbox : null;
 
     if (bbox && Number.isFinite(Number(bbox.page))) {
       const rr: EditRect = {
@@ -266,7 +263,7 @@ export default function FieldLevelEditor() {
     setRect(null);
   }
 
-  // Manual edits
+  // save manual edits
   async function saveAllFields() {
     if (!fields) return;
     setFields(await putFields(fields.doc_id, fields));
@@ -283,15 +280,13 @@ export default function FieldLevelEditor() {
       alert("This field is read-only.");
       return;
     }
-
     try {
       const res = await ocrPreview(docId, rr.page, rr);
       const text = (res?.text || "").trim();
 
-      // Debug crop to verify OCR region
       setLastCrop({ url: res?.crop_url, text });
 
-      // Update UI immediately
+      // immediate UI update
       setFields((prev) =>
         prev
           ? {
@@ -311,7 +306,7 @@ export default function FieldLevelEditor() {
           : prev
       );
 
-      // Persist via /bind
+      // persist
       const st = await bindField(docId, focusedKey, rr.page, rr);
       setFields(st);
       setRect(rr);
@@ -320,7 +315,7 @@ export default function FieldLevelEditor() {
     }
   }
 
-  // Splitter (optional)
+  // (optional) draggable divider
   function onDividerMouseDown(e: React.MouseEvent) {
     e.preventDefault();
     draggingSplit.current = true;
@@ -341,7 +336,6 @@ export default function FieldLevelEditor() {
     window.removeEventListener("mousemove", onDividerMove);
   }
 
-  // helpers
   const serverW = meta[page - 1]?.w || 1;
   const serverH = meta[page - 1]?.h || 1;
   const tokensThisPage = useMemo(() => tokens.filter((t) => t.page === page), [tokens, page]);
@@ -413,7 +407,7 @@ export default function FieldLevelEditor() {
         {/* Divider */}
         <div className="wb-divider" onMouseDown={onDividerMouseDown} title="Drag to resize" />
 
-        {/* RIGHT: Fields */}
+        {/* RIGHT: fields */}
         <div className="wb-right" style={{ flexBasis: `${100 - pdfPct}%` }}>
           <div className="row">
             <label>Doctype</label>

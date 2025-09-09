@@ -1,11 +1,8 @@
-// Single source of truth for client↔server API.
-// Port: 8080 (as you noted)
-
-// Some toolchains don’t type ImportMeta.env — use a safe cast
+// Single source of truth for client↔server API. Port 8080.
 const _env = (import.meta as any)?.env || {};
 export const API: string = _env.VITE_API_BASE || "http://localhost:8080";
 
-// ---------- Types ----------
+/* ---------- Types ---------- */
 export type Box = { page: number; x0: number; y0: number; x1: number; y1: number; text?: string };
 export type MetaResp = { pages: Array<{ page: number; width: number; height: number }> };
 export type UploadResp = { doc_id: string; annotated_tokens_url: string; pages: number };
@@ -27,14 +24,13 @@ export type FieldDocState = {
 export type PromField = { key: string; label: string; type?: string; enum?: string[] };
 export type PromCatalog = { doctype: string; version: string; fields: PromField[] };
 
-// ---------- Helpers ----------
+/* ---------- Helpers ---------- */
 export function docIdFromUrl(url: string): string | null {
-  // matches /data/{doc_id}/original.pdf
   const m = /\/data\/([a-f0-9]{12})\//i.exec(url || "");
   return m ? m[1] : null;
 }
 
-// ---------- Core ----------
+/* ---------- Core ---------- */
 export async function uploadPdf(file: File): Promise<UploadResp> {
   const fd = new FormData();
   fd.append("pdf", file);
@@ -119,7 +115,6 @@ export async function bindField(
   return r.json();
 }
 
-// UPDATED: single implementation of ocrPreview with debug fields
 export async function ocrPreview(
   doc_id: string,
   page: number,
