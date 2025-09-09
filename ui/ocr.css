@@ -439,5 +439,49 @@ button:disabled {
   /* already good; pink shows well on dark */
 }
 
+/* Resizable split layout */
+.wb-split.resizable {
+  display: flex;
+  gap: 0;
+  align-items: stretch;
+  height: calc(100vh - 140px); /* adjust to your header/footer */
+  min-height: 480px;
+}
+
+.wb-left, .wb-right {
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+  overflow: hidden;
+}
+
+.wb-left { /* PDF gets more space by default via flexBasis in TSX */ }
+.wb-right { border-left: 1px solid #e5e7eb; background: #fafafa; }
+
+.wb-divider {
+  width: 6px;
+  cursor: col-resize;
+  background: linear-gradient(90deg, #e5e7eb, #cbd5e1, #e5e7eb);
+  border-left: 1px solid #e5e7eb;
+  border-right: 1px solid #e5e7eb;
+}
+
+.field-table-wrap {
+  overflow: auto;
+  flex: 1;
+  padding-right: 6px;
+}
+
+/* Keep the PDF stage scrollable as needed */
+.pdf-stage {
+  overflow: auto;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  margin: 8px 8px 0 8px;
+  padding: 8px;
+  border-radius: 4px;
+}
+
+
 
 
