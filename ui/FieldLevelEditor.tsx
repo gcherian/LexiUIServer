@@ -22,6 +22,9 @@ import {
 
 type TokenBox = { page:number; x0:number; y0:number; x1:number; y1:number; text?:string };
 
+
+const [lastCrop, setLastCrop] = useState<{ url?: string; text?: string } | null>(null);
+
 function isEditableForCatalogKey(cat: PromCatalog | null, key: string): boolean {
   if (!cat) return true;
   const f = cat.fields.find(x => x.key === key);
@@ -199,6 +202,10 @@ export default function FieldLevelEditor() {
       const res = await ocrPreview(docId, rr.page, rr);
       const text = (res?.text || "").trim();
 
+      // keep for visual confirmation
+      setLastCrop({ url: res.crop_url, text });
+
+// ... then the rest (UI update + bind) stays the same
       // Update UI immediately
       setFields(prev => prev ? {
         ...prev,
@@ -279,6 +286,15 @@ export default function FieldLevelEditor() {
                 onRectChange={setRect}
                 onRectCommit={onRectCommitted}
               />
+{lastCrop?.url && (
+  <div style={{display:"flex", gap:12, alignItems:"flex-start", margin:"8px 8px 0 8px"}}>
+    <img src={lastCrop.url} alt="last-ocr-crop" style={{maxWidth:220, border:"1px solid #e5e7eb", borderRadius:4}}/>
+    <div style={{fontSize:12}}>
+      <div style={{fontWeight:600, marginBottom:4}}>Last OCR</div>
+      <div style={{whiteSpace:"pre-wrap"}}>{lastCrop.text}</div>
+    </div>
+  </div>
+)}
               <div className="hint">
                 Drag inside the pink box to move. Drag handles to resize. Release to OCR & update the field.
               </div>
