@@ -230,51 +230,49 @@ export default function PdfCanvas({
     }
   }
 
-  function onMouseUp() {
-    if (!lasso) return;
-    const svg = overlayRef.current!;
-    const tmp = svg.querySelector("#__lasso__") as SVGRectElement | null;
+function onMouseUp() {
+  if (!lasso) return;
+  const svg = overlayRef.current!;
+  const tmp = svg.querySelector("#__lasso__") as SVGRectElement | null;
 
-    const vx = lastViewportSize.current.w;
-    const vy = lastViewportSize.current.h;
-    const { sx, sy } = scaleRef.current; // canvas pixels per server px
+  // Read draw-state BEFORE cleanup
+  const sxData = Number(svg.dataset["sx"] || NaN);
+  const syData = Number(svg.dataset["sy"] || NaN);
 
-    // Clean up draw state
-    const sxData = Number(svg.dataset["sx"] || NaN);
-    const syData = Number(svg.dataset["sy"] || NaN);
-    svg.dataset["sx"] = "";
-    svg.dataset["sy"] = "";
-    if (tmp) tmp.remove();
+  // Extract final rect (canvas/SVG space) robustly
+  let ex = Number.isFinite(parseFloat(tmp?.getAttribute("x") || "")) ? parseFloat(tmp!.getAttribute("x")!) : sxData;
+  let ey = Number.isFinite(parseFloat(tmp?.getAttribute("y") || "")) ? parseFloat(tmp!.getAttribute("y")!) : syData;
+  let ew = Number.isFinite(parseFloat(tmp?.getAttribute("width") || "")) ? parseFloat(tmp!.getAttribute("width")!) : 0;
+  let eh = Number.isFinite(parseFloat(tmp?.getAttribute("height") || "")) ? parseFloat(tmp!.getAttribute("height")!) : 0;
 
-    if (Number.isNaN(sxData) || Number.isNaN(syData)) return;
+  // Cleanup draw-state AFTER reading values
+  svg.dataset["sx"] = "";
+  svg.dataset["sy"] = "";
+  if (tmp) tmp.remove();
 
-    // Compute final rect in SVG/canvas space
-    // We stored the final rect in the element; if it doesn't exist, use a single-point selection.
-    const ex = Number((tmp as any)?.getAttribute?.("x") ?? sxData);
-    const ey = Number((tmp as any)?.getAttribute?.("y") ?? syData);
-    const ew = Number((tmp as any)?.getAttribute?.("width") ?? 0);
-    const eh = Number((tmp as any)?.getAttribute?.("height") ?? 0);
+  if (Number.isNaN(sxData) || Number.isNaN(syData)) return;
 
-    // Convert canvas/svg px -> server px
-    let X0 = Math.round(ex / sx),
-      Y0 = Math.round(ey / sy),
-      X1 = Math.round((ex + ew) / sx),
-      Y1 = Math.round((ey + eh) / sy);
+  // Normalize canvas-space rect
+  let x0c = Math.min(ex, ex + ew), y0c = Math.min(ey, ey + eh);
+  let x1c = Math.max(ex, ex + ew), y1c = Math.max(ey, ey + eh);
 
-    // Normalize and clamp
-    if (X0 > X1) [X0, X1] = [X1, X0];
-    if (Y0 > Y1) [Y0, Y1] = [Y1, Y0];
-    X0 = clamp(X0, 0, Math.max(0, serverW - 1));
-    Y0 = clamp(Y0, 0, Math.max(0, serverH - 1));
-    X1 = clamp(X1, 0, Math.max(0, serverW - 1));
-    Y1 = clamp(Y1, 0, Math.max(0, serverH - 1));
+  // Convert canvas/svg px -> server px (top-left origin on both sides)
+  const { sx, sy } = scaleRef.current; // canvas px per server px
+  let X0 = Math.floor(x0c / sx);
+  let Y0 = Math.floor(y0c / sy);
+  let X1 = Math.ceil(x1c / sx);
+  let Y1 = Math.ceil(y1c / sy);
 
-    // Ignore degenerate rects
-    if (Math.abs(X1 - X0) < 2 || Math.abs(Y1 - Y0) < 2) return;
+  // Clamp to page
+  X0 = clamp(X0, 0, Math.max(0, serverW - 1));
+  Y0 = clamp(Y0, 0, Math.max(0, serverH - 1));
+  X1 = clamp(X1, 0, Math.max(0, serverW - 1));
+  Y1 = clamp(Y1, 0, Math.max(0, serverH - 1));
 
-    onLassoDone?.({ x0: X0, y0: Y0, x1: X1, y1: Y1 });
-  }
+  if (X1 - X0 < 2 || Y1 - Y0 < 2) return; // ignore degenerate selections
 
+  onLassoDone?.({ x0: X0, y0: Y0, x1: X1, y1: Y1 });
+}
   function clamp(n: number, lo: number, hi: number) {
     return Math.min(hi, Math.max(lo, n));
   }

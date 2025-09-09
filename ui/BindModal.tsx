@@ -123,17 +123,32 @@ export default function BindModal({
               onLassoDone={async (r) => {
                 setRect(r);
                 setModeLasso(false);
-            
+              
                 try {
                   const res = await ocrPreview(docId, page, r);
                   const text = (res?.text || "").trim();
                   setValue(text);
-                  // quick demo feedback:
-                  alert(text ? `OCR result:\n\n${text}` : "No text detected in selection.");
-                } catch (e) {
-                  alert("OCR failed. Please try again.");
+              
+                  // DEMO UX: if a key is already selected, auto-bind so the table updates immediately.
+                  if (key && text) {
+                    setBinding(true);
+                    try {
+                      const st = await bindField(docId, key, page, r);
+                      onBound?.(st); // refresh the main table
+                      alert(`Bound "${key}" to:\n\n${text}`);
+                      onClose();
+                    } finally {
+                      setBinding(false);
+                    }
+                  } else {
+                    // Otherwise, at least let the user see the OCR output
+                    alert(text ? `OCR result:\n\n${text}` : "No text detected in selection.");
+                  }
+                } catch (e: any) {
+                  alert(`OCR failed: ${e?.message || e}`);
                 }
               }}
+
             />
 
 
