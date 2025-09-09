@@ -393,6 +393,7 @@ export default function FieldLevelEditor() {
                 </button>
               </div>
               <PdfEditCanvas
+                key={`${docId}:${page}:${serverW}x${serverH}`}  // force clean remount on page/size change
                 docUrl={docUrl}
                 page={page}
                 serverW={serverW}
@@ -404,6 +405,7 @@ export default function FieldLevelEditor() {
                 onRectChange={setRect}
                 onRectCommit={onRectCommitted}
               />
+
               {lastCrop?.url && (
                 <div style={{ display: "flex", gap: 12, alignItems: "flex-start", margin: "8px 8px 0 8px" }}>
                   <img
