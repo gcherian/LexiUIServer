@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import "../ocr.css";
 import PdfEditCanvas, { type EditRect } from "./PdfEditCanvas";
+import type { Box as TokenBox } from "../../../lib/api";
 
 import {
   API,
@@ -85,7 +86,10 @@ function linePenalty(span: TokenBox[]) {
   const avg = hs.reduce((a, b) => a + b, 0) / Math.max(1, hs.length);
   return Math.max(0, yspread - avg * 0.6) / Math.max(1, avg);
 }
+
+
 type Candidate = { score: number; page: number; span: TokenBox[] };
+
 function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 8) {
   const value = valueRaw?.trim();
   if (!value) return null;
@@ -130,6 +134,7 @@ function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 
   });
 
   if (!best) return null;
+
   const rect = unionRect(best.span);
   return { page: best.page, rect, score: best.score };
 }

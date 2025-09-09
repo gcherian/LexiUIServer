@@ -1,42 +1,25 @@
-// File: src/components/lasso/BindModal.tsx
-import React, { useEffect, useState } from "react";
-import { createPortal } from "react-dom";
-import PdfCanvas from "./PdfCanvas";
-import type { RectServer } from "./PdfCanvas";
-import { ocrPreview, bindField, type FieldDocState } from "../../../lib/api";
-
-/** Minimal box shape (kept local to avoid deps drift). */
-type BoxLike = {
-  page: number;
-  x0: number; y0: number; x1: number; y1: number;
-  id?: string | null;
-  label?: string | null;
-  text?: string | null;
-  confidence?: number | null;
-};
+import React, { useEffect, useMemo, useState } from "react";
+import PdfEditCanvas, { type EditRect } from "./PdfEditCanvas";
+import {
+  ocrPreview,
+  bindField,
+  getBoxes,
+  type Box as TokenBox,
+  type FieldDocState,
+} from "../../../lib/api";
 
 type Props = {
   open: boolean;
   onClose: () => void;
-
-  // Document context
   docId: string;
   docUrl: string;
   page: number;
   serverW: number;
   serverH: number;
-
-  // Field keys for dropdown (from PROM)
   allKeys: string[];
-
-  // Optional: opening from an existing OCR box
-  box?: BoxLike | null;
-
-  // Optional: preselect a key (e.g., first missing key)
-  initialKey?: string | null;
-
-  // After successful bind, caller can update its state
-  onBound?: (st: FieldDocState) => void;
+  box: TokenBox | null;          // if opened by clicking a token box
+  initialKey: string;            // default field to preselect
+  onBound: (state: FieldDocState) => void;
 };
 
 export default function BindModal({
@@ -52,157 +35,99 @@ export default function BindModal({
   initialKey,
   onBound,
 }: Props) {
-  const [modeLasso, setModeLasso] = useState<boolean>(!box); // start in lasso if no box provided
-  const [rect, setRect] = useState<RectServer | null>(box ? { x0: box.x0, y0: box.y0, x1: box.x1, y1: box.y1 } : null);
-  const [value, setValue] = useState<string>("");
-  const [key, setKey] = useState<string>(initialKey || "");
-  const [binding, setBinding] = useState<boolean>(false);
+  const [keySel, setKeySel] = useState<string>(initialKey || "");
+  const [rect, setRect] = useState<EditRect | null>(null);
+  const [tokens, setTokens] = useState<TokenBox[]>([]);
+  const [ocrText, setOcrText] = useState<string>("");
 
-  // Reset per open/box
   useEffect(() => {
-    setModeLasso(!box);
-    setRect(box ? { x0: box.x0, y0: box.y0, x1: box.x1, y1: box.y1 } : null);
-    setValue("");
+    if (!open) return;
+    (async () => {
+      setTokens((await getBoxes(docId)).filter((b) => b.page === page));
+    })();
+  }, [open, docId, page]);
+
+  useEffect(() => {
+    setKeySel(initialKey || "");
+  }, [initialKey, open]);
+
+  // if opened from a token click, pre-populate rect
+  useEffect(() => {
+    if (box && open) {
+      setRect({ page: box.page, x0: box.x0, y0: box.y0, x1: box.x1, y1: box.y1 });
+      setOcrText(box.text || "");
+    } else if (open) {
+      setRect(null);
+      setOcrText("");
+    }
   }, [box, open]);
-
-  // Sync initialKey when provided
-  useEffect(() => {
-    if (initialKey) setKey(initialKey);
-  }, [initialKey]);
-
-  async function previewOCR() {
-    if (!rect) return;
-    try {
-      const r = await ocrPreview(docId, page, rect);
-      setValue(r?.text || "");
-    } catch {
-      // swallow; UI stays as-is
-    }
-  }
-
-  async function doBind() {
-    if (!rect || !key) return;
-    setBinding(true);
-    try {
-      const st = await bindField(docId, key, page, rect);
-      onBound?.(st);
-      onClose();
-    } finally {
-      setBinding(false);
-    }
-  }
 
   if (!open) return null;
 
-  return createPortal(
-    <div className="modal-backdrop" onMouseDown={(e) => { /* clicking backdrop = no-op */ }}>
-      <div className="modal-card" onMouseDown={(e) => e.stopPropagation()}>
-        {/* Sticky header within the card so the top never hides under app header */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, background: "inherit", paddingBottom: 6, zIndex: 1 }}>
-          <h3 style={{ margin: 0 }}>Bind Field</h3>
-          <button onClick={onClose}>✕</button>
+  async function onLassoDone(r: EditRect) {          // ✅ typed
+    setRect(r);
+    const res = await ocrPreview(docId, r.page, r);
+    setOcrText(res?.text || "");
+  }
+
+  async function onBind() {
+    if (!rect || !keySel) return;
+    const st = await bindField(docId, keySel, rect.page, rect);
+    onBound(st);
+    onClose();
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <div style={{ fontWeight: 600 }}>Bind value by Lasso</div>
+          <button className="icon" onClick={onClose}>×</button>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 320px", gap: 12, marginTop: 8 }}>
-          {/* Left: mini viewer with optional lasso and single preselected box */}
-          <div className="border pad">
-            <div className="toolbar-inline">
-              <label className={modeLasso ? "btn toggle active" : "btn toggle"}>
-                <input type="checkbox" checked={modeLasso} onChange={() => setModeLasso((v) => !v)} /> Lasso
-              </label>
-              <button className="btn toggle" onClick={previewOCR} disabled={!rect}>Preview OCR</button>
+        <div className="modal-body" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div>
+            <div style={{ marginBottom: 6 }}>
+              <label>Field</label>
+              <select value={keySel} onChange={(e) => setKeySel(e.target.value)}>
+                <option value="">(choose a field)</option>
+                {allKeys.map((k) => (
+                  <option key={k} value={k}>{k}</option>
+                ))}
+              </select>
             </div>
-            <PdfCanvas
-              docUrl={docUrl}
-              page={page}
-              serverW={serverW}
-              serverH={serverH}
-              boxes={box ? [box] : []}
-              showBoxes={!!box}
-              lasso={modeLasso}
-              onLassoDone={async (r) => {
-                setRect(r);
-                setModeLasso(false);
-              
-                try {
-                  const res = await ocrPreview(docId, page, r);
-                  const text = (res?.text || "").trim();
-                  setValue(text);
-              
-                  // DEMO UX: if a key is already selected, auto-bind so the table updates immediately.
-                  if (key && text) {
-                    setBinding(true);
-                    try {
-                      const st = await bindField(docId, key, page, r);
-                      onBound?.(st); // refresh the main table
-                      alert(`Bound "${key}" to:\n\n${text}`);
-                      onClose();
-                    } finally {
-                      setBinding(false);
-                    }
-                  } else {
-                    // Otherwise, at least let the user see the OCR output
-                    alert(text ? `OCR result:\n\n${text}` : "No text detected in selection.");
-                  }
-                } catch (e: any) {
-                  alert(`OCR failed: ${e?.message || e}`);
-                }
-              }}
-
-            />
-
-
+            <div className="pdf-wrap" style={{ border: "1px solid #e5e7eb", borderRadius: 6, padding: 6 }}>
+              <PdfEditCanvas
+                docUrl={docUrl}
+                page={page}
+                serverW={serverW}
+                serverH={serverH}
+                tokens={tokens}
+                rect={rect}
+                showTokenBoxes={true}
+                editable={true}
+                onRectChange={setRect}
+                onRectCommit={onLassoDone}
+              />
+            </div>
           </div>
 
-          {/* Right: form */}
           <div>
-            <div className="row">
-              <label>Field</label>
-              <input
-                list="bind-keys"
-                value={key}
-                onChange={(e) => setKey(e.target.value)}
-                placeholder="e.g., invoice_number"
-              />
-              <datalist id="bind-keys">
-                {allKeys.map((k) => (
-                  <option key={k} value={k} />
-                ))}
-              </datalist>
-            </div>
-
-            <div className="row">
-              <label>Value</label>
-              <textarea rows={6} value={value} onChange={(e) => setValue(e.target.value)} />
-            </div>
-
-            <div className="row">
-              <label>Where</label>
-              <input
-                disabled
-                value={
-                  rect
-                    ? `x0=${rect.x0}, y0=${rect.y0}, x1=${rect.x1}, y1=${rect.y1}`
-                    : "(draw or select a box)"
-                }
-              />
-            </div>
-
-            <div className="flex justify-end" style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 6 }}>OCR preview</div>
+            <textarea
+              style={{ width: "100%", height: 220 }}
+              value={ocrText}
+              onChange={(e) => setOcrText(e.target.value)}
+            />
+            <div style={{ marginTop: 12, display: "flex", gap: 8, justifyContent: "flex-end" }}>
               <button onClick={onClose}>Cancel</button>
-              <button
-                className="primary"
-                onClick={doBind}
-                disabled={!rect || !key || binding}
-                style={{ marginLeft: 8 }}
-              >
-                {binding ? "Binding…" : "Bind"}
+              <button className="primary" disabled={!keySel || !rect} onClick={onBind}>
+                Bind
               </button>
             </div>
           </div>
         </div>
       </div>
-    </div>,
-    document.body
+    </div>
   );
 }
