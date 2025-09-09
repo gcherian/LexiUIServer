@@ -1,94 +1,140 @@
-// Minimal client for FastAPI ocr_lasso server.
+// Single source of truth for client↔server API.
+// Port: 8080 (as you noted)
 
-export type Rect = { x0:number; y0:number; x1:number; y1:number };
+// Some toolchains don’t type ImportMeta.env — use a safe cast
+const _env = (import.meta as any)?.env || {};
+export const API: string = _env.VITE_API_BASE || "http://localhost:8080";
 
-export type Box = {
-  page:number; x0:number; y0:number; x1:number; y1:number;
-  id?:string|null; label?:string|null; text?:string|null; confidence?:number|null;
-};
-
-export type MetaResp = { pages: Array<{ page:number; width:number; height:number }> };
-export type UploadResp = { doc_id:string; annotated_tokens_url:string; pages:number };
+// ---------- Types ----------
+export type Box = { page: number; x0: number; y0: number; x1: number; y1: number; text?: string };
+export type MetaResp = { pages: Array<{ page: number; width: number; height: number }> };
+export type UploadResp = { doc_id: string; annotated_tokens_url: string; pages: number };
 
 export type FieldState = {
-  key?:string|null; name?:string|null; value?:string|null;
-  confidence?:number|null; source?:string|null;
-  page?:number|null; bbox?: (Rect & { page:number }) | null;
+  key: string;
+  value?: string | null;
+  bbox?: { page: number; x0: number; y0: number; x1: number; y1: number } | null;
+  source?: string;
+  confidence?: number;
 };
-export type FieldDocState = { doc_id:string; doctype:string; fields:FieldState[]; audit?:Array<Record<string,any>> };
-export type PromCatalog = { doctype:string; version:string; fields:Array<{ key:string; label:string }> };
+export type FieldDocState = {
+  doc_id: string;
+  doctype: string;
+  fields: FieldState[];
+  audit: Array<Record<string, any>>;
+};
 
-const API_BASE =
-  (typeof window !== "undefined" && (window as any).__API_BASE__) ||
-  (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_BASE) ||
-  "http://localhost:8080";
-export const API = API_BASE;
+export type PromField = { key: string; label: string; type?: string; enum?: string[] };
+export type PromCatalog = { doctype: string; version: string; fields: PromField[] };
 
-
-const qs = (o:Record<string,any>) => new URLSearchParams(Object.entries(o).filter(([,v]) => v!==undefined && v!==null).map(([k,v])=>[k,String(v)])).toString();
-async function j<T=any>(url:string, init?:RequestInit):Promise<T>{
-  const r = await fetch(url, init);
-  if(!r.ok){ throw new Error(`[${r.status}] ${await r.text().catch(()=>r.statusText)}`); }
-  return r.status===204 ? (undefined as any) : await r.json();
+// ---------- Helpers ----------
+export function docIdFromUrl(url: string): string | null {
+  // matches /data/{doc_id}/original.pdf
+  const m = /\/data\/([a-f0-9]{12})\//i.exec(url || "");
+  return m ? m[1] : null;
 }
 
-export const docUrlFromId = (id:string)=>`${API_BASE}/data/${id}/original.pdf`;
-export const docIdFromUrl = (u:string)=>/\/data\/([^/]+)\/original\.pdf$/i.exec(u||"")?.[1]||"";
+// ---------- Core ----------
+export async function uploadPdf(file: File): Promise<UploadResp> {
+  const fd = new FormData();
+  fd.append("pdf", file);
+  const r = await fetch(`${API}/lasso/upload`, { method: "POST", body: fd });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
 
-export async function uploadPdf(file:File):Promise<UploadResp>{
-  const fd = new FormData(); fd.append("pdf", file); fd.append("backend","tesseract");
-  return j(`${API_BASE}/lasso/upload`, { method:"POST", body:fd });
+export async function getMeta(doc_id: string): Promise<MetaResp> {
+  const r = await fetch(`${API}/lasso/doc/${doc_id}/meta`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
 }
-export async function getMeta(doc_id:string):Promise<MetaResp>{
-  return j(`${API_BASE}/lasso/doc/${doc_id}/meta`);
+
+export async function getBoxes(doc_id: string): Promise<Box[]> {
+  const r = await fetch(`${API}/lasso/doc/${doc_id}/boxes`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
 }
-export async function getBoxes(doc_id:string):Promise<Box[]>{
-  return j(`${API_BASE}/lasso/doc/${doc_id}/boxes`);
+
+export async function listProms(): Promise<Array<{ doctype: string; file: string }>> {
+  const r = await fetch(`${API}/lasso/prom`);
+  if (!r.ok) throw new Error(await r.text());
+  const j = await r.json();
+  return j.doctypes || [];
 }
-export async function getFields(doc_id:string):Promise<FieldDocState>{
-  return j(`${API_BASE}/lasso/doc/${doc_id}/fields`);
+
+export async function getProm(doctype: string): Promise<PromCatalog> {
+  const r = await fetch(`${API}/lasso/prom/${encodeURIComponent(doctype)}`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
 }
-export async function putFields(doc_id:string, state:FieldDocState):Promise<FieldDocState>{
-  return j(`${API_BASE}/lasso/doc/${doc_id}/fields`, {
-    method:"PUT", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(state)
+
+export async function setDoctype(doc_id: string, doctype: string) {
+  const r = await fetch(`${API}/lasso/doc/${doc_id}/doctype`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ doctype }),
   });
-}
-export async function listProms(){ return (await j<{doctypes:Array<{doctype:string;file:string}>}>(`${API_BASE}/lasso/prom`)).doctypes; }
-export async function getProm(doctype:string){ return j<PromCatalog>(`${API_BASE}/lasso/prom/${encodeURIComponent(doctype)}`); }
-export async function setDoctype(doc_id:string, doctype:string){ return j(`${API_BASE}/lasso/doc/${doc_id}/doctype`, {
-  method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ doctype })
-}); }
-export async function ecmExtract(doc_id:string, doctype:string){ return j<FieldDocState>(`${API_BASE}/lasso/ecm/extract`, {
-  method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ doc_id, doctype })
-}); }
-export async function ocrPreview(doc_id:string, page:number, rect:Rect){ 
-  return j<{ text:string }>(`${API_BASE}/lasso/lasso`,{
-    method:"POST", headers:{ "Content-Type":"application/json" },
-    body: JSON.stringify({ doc_id, page, ...rect })
-  });
-}
-export async function bindField(doc_id:string, key:string, page:number, rect:Rect){
-  return j<FieldDocState>(`${API_BASE}/lasso/doc/${doc_id}/bind`,{
-    method:"POST", headers:{ "Content-Type":"application/json" },
-    body: JSON.stringify({ doc_id, key, page, rect })
-  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
 }
 
-export async function ocrPreview(doc_id: string, page: number, rect: {x0:number;y0:number;x1:number;y1:number}) {
+export async function getFields(doc_id: string): Promise<FieldDocState> {
+  const r = await fetch(`${API}/lasso/doc/${doc_id}/fields`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function putFields(doc_id: string, state: FieldDocState): Promise<FieldDocState> {
+  const r = await fetch(`${API}/lasso/doc/${doc_id}/fields`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(state),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function ecmExtract(doc_id: string, doctype: string): Promise<FieldDocState> {
+  const r = await fetch(`${API}/lasso/ecm/extract`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ doc_id, doctype }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function bindField(
+  doc_id: string,
+  key: string,
+  page: number,
+  rect: { x0: number; y0: number; x1: number; y1: number }
+): Promise<FieldDocState> {
+  const r = await fetch(`${API}/lasso/doc/${doc_id}/bind`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ doc_id, page, key, rect }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+// UPDATED: single implementation of ocrPreview with debug fields
+export async function ocrPreview(
+  doc_id: string,
+  page: number,
+  rect: { x0: number; y0: number; x1: number; y1: number }
+): Promise<{
+  text: string;
+  rect_used: { page: number; x0: number; y0: number; x1: number; y1: number };
+  page_size: { width: number; height: number };
+  crop_url?: string;
+}> {
   const r = await fetch(`${API}/lasso/lasso`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ doc_id, page, ...rect })
+    body: JSON.stringify({ doc_id, page, ...rect }),
   });
   if (!r.ok) throw new Error(await r.text());
-  // NEW: include debug fields from server
-  return r.json() as Promise<{
-    text: string;
-    rect_used: { page:number; x0:number; y0:number; x1:number; y1:number };
-    page_size: { width:number; height:number };
-    crop_url?: string;
-  }>;
+  return r.json();
 }
-
-
-
