@@ -220,7 +220,11 @@ def run_full_ocr(doc_id: str, params: OCRParams) -> MetaResp:
         pages_meta.append({"page":page_no,"width":float(w),"height":float(h)})
         all_page_texts.append(" ".join(tokens_this_page))
 
-    meta_path(doc_id).write_text(json.dumps({"pages": pages_meta, "params": params.model_dump()}, indent=2))
+    meta_path(doc_id).write_text(json.dumps({
+      "pages": pages_meta,
+      "params": params.model_dump(),
+      "coord_space": {"origin": "top-left", "units": "px@dpi", "dpi": params.dpi}
+    }, indent=2))
     boxes_path(doc_id).write_text(json.dumps(all_boxes))
     page_text_path(doc_id).write_text("\n\n".join(all_page_texts))
     build_embeddings(doc_id)
@@ -324,11 +328,16 @@ async def get_meta(doc_id: str):
     if not mp.exists(): raise HTTPException(404, "Meta not found")
     return MetaResp(pages=json.loads(mp.read_text())["pages"])
 
+
 @router.get("/doc/{doc_id}/boxes", response_model=List[Box])
-async def get_boxes(doc_id: str):
+async def get_boxes(doc_id: str, page: Optional[int] = Query(None)):
     bp = boxes_path(doc_id)
-    if not bp.exists(): return []
-    return [Box(**b) for b in json.loads(bp.read_text())]
+    if not bp.exists():
+        return []
+    items = [Box(**b) for b in json.loads(bp.read_text())]
+    if page is not None:
+        items = [b for b in items if b.page == page]
+    return items
 
 # ---- Token search (fuzzy) ----
 @router.post("/search")
@@ -386,8 +395,8 @@ async def lasso_crop(req: LassoReq):
 
     crop = img.crop((x0, y0, x1, y1))
     cw, ch = crop.size
-    if cw < 140 or ch < 40:
-        scale = 3 if max(cw, ch) < 60 else 2
+    if cw < 180 or ch < 52:
+        scale = 3 if max(cw, ch) < 70 else 2
         crop = crop.resize((crop.width * scale, crop.height * scale), Image.BICUBIC)
 
     def ocr_try(psm: int, im: Image.Image) -> str:
@@ -435,7 +444,7 @@ async def prom_get(doctype: str):
     assert_prom_ready()
     p = PROM / f"{doctype}.json"
     if not p.exists():
-        raise HTTPException(404, f"PROM catalog not found for '{doctype}'")
+        raise HTTPException(404, f"PROM catalog not found for '{doctype}'. Available: {[p.stem for p in PROM.glob('*.json')]}")
     return PromCatalog(**json.loads(p.read_text()))
 
 # ---- Fields / ECM / Bind ----
@@ -462,8 +471,11 @@ async def set_doctype(doc_id: str, req: SetDocTypeReq):
 @router.get("/doc/{doc_id}/fields", response_model=FieldDocState)
 async def get_fields(doc_id: str):
     fp = fields_path(doc_id)
-    if not fp.exists(): raise HTTPException(404, "Fields not initialized")
+    if not fp.exists():
+        # Return an empty shell instead of 404
+        return FieldDocState(doc_id=doc_id, doctype="unknown", fields=[], audit=[])
     return FieldDocState(**json.loads(fp.read_text()))
+
 
 @router.put("/doc/{doc_id}/fields", response_model=FieldDocState)
 async def put_fields(doc_id: str, state: FieldDocState):
