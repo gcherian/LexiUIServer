@@ -1,44 +1,401 @@
-/* ===== Layout ===== */
-.app-root { height: 100vh; display: flex; flex-direction: column; }
-.workbench { display:flex; flex-direction:column; height:100%; gap:.75rem; padding:.75rem; }
-.wb-toolbar { display:flex; align-items:center; gap:.5rem; }
-.wb-toolbar .spacer { flex:1; }
-.wb-split { display:grid; grid-template-columns: 1fr 420px; gap: .75rem; height: calc(100% - 52px); }
+/* ==========================================================================
+   EDIP OCR / Lasso Workbench Styles
+   File: src/components/ocr.css
+   ==========================================================================
+   Sections
+   1) CSS Reset & Base
+   2) App Layout
+   3) Toolbar
+   4) Panels (Left/Right)
+   5) PDF Stage + Overlays (boxes + lasso)
+   6) Forms & Inputs
+   7) Tables
+   8) Buttons, Badges, Chips
+   9) Helpers & Utilities
+   10) Responsive
+   ========================================================================== */
 
-/* ===== Panels ===== */
-.wb-left { position:relative; overflow:auto; background:#fafafa; border:1px solid #e5e7eb; border-radius:10px; padding:.5rem; }
-.wb-right { overflow:auto; border:1px solid #e5e7eb; border-radius:10px; padding:.9rem; background:#fff; }
 
-/* ===== PDF Stage ===== */
-.pdf-stage { position: relative; display: inline-block; }
-.pdf-stage canvas { display:block; border-radius:6px; }
-.overlay { position:absolute; inset:0; pointer-events:auto; }
+/* 1) CSS Reset & Base ----------------------------------------------------- */
+
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color: #111827;            /* gray-900 */
+  background: #f8fafc;       /* slate-50 */
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+        Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+:root {
+  --border: #e5e7eb;         /* gray-200 */
+  --muted: #6b7280;          /* gray-500 */
+  --muted-2: #9ca3af;        /* gray-400 */
+  --panel: #ffffff;          /* white */
+  --panel-soft: #fafafa;     /* near white */
+  --primary: #2563eb;        /* blue-600 */
+  --primary-700: #1d4ed8;    /* blue-700 */
+  --accent: #6366f1;         /* indigo-500 */
+  --warn: #f59e0b;           /* amber-500 */
+  --danger: #dc2626;         /* red-600 */
+  --success: #16a34a;        /* green-600 */
+}
+
+
+/* 2) App Layout ----------------------------------------------------------- */
+
+.workbench {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  gap: .75rem;
+  padding: .75rem;
+}
+
+.wb-split {
+  display: grid;
+  grid-template-columns: 1fr 440px;
+  gap: .75rem;
+  height: calc(100% - 52px);
+  min-height: 420px;
+}
+
+.section-title {
+  font-weight: 600;
+  margin: .25rem 0 .5rem;
+}
+
+.muted { color: var(--muted); font-size: 12px; }
+.small { font-size: 12px; }
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+               "Liberation Mono", monospace;
+}
+
+
+/* 3) Toolbar -------------------------------------------------------------- */
+
+.wb-toolbar {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  padding: .5rem .6rem;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: 10px;
+}
+
+.wb-toolbar .spacer { flex: 1; }
+
+.toolbar-inline {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  margin-bottom: .5rem;
+}
+
+.page-indicator { font-variant-numeric: tabular-nums; }
+
+
+/* 4) Panels (Left/Right) -------------------------------------------------- */
+
+.wb-left {
+  position: relative;
+  overflow: auto;
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: .5rem;
+}
+
+.wb-right {
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: .9rem;
+}
+
+.placeholder {
+  color: var(--muted);
+  font-style: italic;
+  padding: .5rem;
+}
+
+
+/* 5) PDF Stage + Overlays ------------------------------------------------- */
+
+.pdf-stage {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+}
+
+.pdf-stage canvas {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 1px 0 rgba(0,0,0,.02);
+}
+
+/* overlay is a full-canvas SVG for boxes & lasso */
+.overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: auto;
+}
+
 .overlay.crosshair { cursor: crosshair; }
 
-/* ===== Box Styling ===== */
-.bbox-rect { fill: rgba(255, 210, 0, 0.22); stroke: rgba(255, 160, 0, 0.95); stroke-width: 1.5; }
-.bbox-rect.selected { fill: rgba(30, 144, 255, 0.18); stroke: rgba(30, 144, 255, 0.95); stroke-width: 2; }
-.bbox-rect.drawing { fill: rgba(0,0,0,0.06); stroke-dasharray: 4 3; }
+/* token/word boxes */
+.bbox-rect {
+  fill: rgba(255, 210, 0, 0.22);                 /* soft amber fill */
+  stroke: rgba(255, 160, 0, 0.95);               /* amber stroke */
+  stroke-width: 1.5;
+}
 
-/* ===== Controls ===== */
-.btn { display:inline-flex; align-items:center; gap:.35rem; }
-.btn.toggle { border:1px solid #d1d5db; background:#fff; padding:.38rem .7rem; border-radius:8px; cursor:pointer; }
-.btn.toggle.active { background:#e0e7ff; border-color:#6366f1; }
-.primary { background:#2563eb; color:#fff; border:none; border-radius:8px; padding:.48rem .9rem; cursor:pointer; }
-.linklike { color:#2563eb; text-decoration:none; }
-.linklike:hover { text-decoration:underline; }
+.bbox-rect.selected {
+  fill: rgba(29, 78, 216, .18);                  /* blue-700 fill alpha */
+  stroke: rgba(29, 78, 216, .95);
+  stroke-width: 2;
+}
+
+.bbox-rect.drawing {
+  fill: rgba(0,0,0,.06);
+  stroke: rgba(0,0,0,.5);
+  stroke-dasharray: 4 3;
+}
+
+/* numeric label (optional) */
+.box-tag {
+  fill: rgba(17,24,39,.95);                      /* gray-900 */
+  stroke: rgba(255,255,255,.8);
+  stroke-width: .5;
+}
+
+.box-tag-text {
+  font: 11px/1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono";
+  fill: #fff;
+  text-anchor: middle;
+  dominant-baseline: middle;
+}
+
+
+/* 6) Forms & Inputs ------------------------------------------------------- */
+
+.row {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: .6rem;
+  align-items: center;
+  margin-top: .4rem;
+}
+
+input[type="text"],
+input[type="search"],
+input[type="number"],
+input[type="url"],
+select,
+textarea {
+  width: 100%;
+  font: inherit;
+  padding: .48rem .6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: inherit;
+  outline: none;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+
+textarea { resize: vertical; }
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(99,102,241,.18);
+}
+
 .input { min-width: 360px; max-width: 60vw; }
 
-/* ===== Forms / Lists ===== */
-.row { display:grid; grid-template-columns: 110px 1fr; gap:.6rem; align-items:center; margin-top:.35rem; }
-.field-list { display:flex; flex-direction:column; gap:.55rem; }
-.field-row { display:grid; grid-template-columns: 190px 1fr auto; gap:.5rem; align-items:center; }
-.section-title { font-weight:600; margin:.25rem 0; }
-.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
-.muted { color:#6b7280; font-size:12px; }
-.hint { color:#6b7280; font-size:12px; margin-top:.5rem; }
-.placeholder { color:#6b7280; font-style:italic; padding:.5rem; }
+.field-list { display: flex; flex-direction: column; gap: .55rem; }
 
-/* Page controls above canvas (used by OcrWorkbench) */
-.toolbar-inline { display:flex; align-items:center; gap:.5rem; margin-bottom:.5rem; }
-.page-indicator { font-variant-numeric: tabular-nums; }
+.field-row {
+  display: grid;
+  grid-template-columns: 200px 1fr auto;
+  gap: .5rem;
+  align-items: center;
+}
+
+.key {
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.value-missing {
+  background: #fff7ed;               /* orange-50 */
+  border: 1px dashed #fed7aa;        /* orange-200 */
+  border-radius: 8px;
+  padding: .2rem .35rem;
+}
+
+
+/* 7) Tables --------------------------------------------------------------- */
+
+table { width: 100%; border-collapse: collapse; }
+
+th, td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid #f1f5f9; /* slate-100 */
+  vertical-align: middle;
+}
+
+thead th {
+  background: #f8fafc;               /* slate-50 */
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+
+tr:hover td {
+  background: #f9fafb;               /* gray-50 */
+}
+
+tr.missing td {
+  background: #fff7ed;               /* orange-50 */
+}
+
+.badge {
+  display: inline-block;
+  padding: .15rem .4rem;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.badge.success { border-color: #a7f3d0; color: var(--success); background: #ecfdf5; }
+.badge.warn    { border-color: #fed7aa; color: var(--warn);    background: #fffbeb; }
+.badge.danger  { border-color: #fecaca; color: var(--danger);  background: #fef2f2; }
+
+
+/* 8) Buttons, Badges, Chips ---------------------------------------------- */
+
+button {
+  font: inherit;
+  color: inherit;
+  background: #fff;
+  border: 1px solid var(--border);
+  padding: .46rem .75rem;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, color .15s ease;
+}
+
+button:hover { background: #f3f4f6; }              /* gray-100 */
+
+button:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+
+.primary {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.primary:hover { background: var(--primary-700); border-color: var(--primary-700); }
+
+.btn { display: inline-flex; align-items: center; gap: .35rem; }
+
+.btn.toggle {
+  border: 1px solid var(--border);
+  background: #fff;
+  padding: .38rem .7rem;
+  border-radius: 8px;
+}
+
+.btn.toggle.active {
+  background: #e0e7ff;               /* indigo-100 */
+  border-color: var(--accent);
+}
+
+.linklike {
+  color: var(--primary);
+  text-decoration: none;
+}
+.linklike:hover { text-decoration: underline; }
+
+
+/* 9) Helpers & Utilities -------------------------------------------------- */
+
+.pad-sm { padding: .25rem; }
+.pad    { padding: .5rem; }
+.pad-lg { padding: .9rem; }
+
+.border { border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: .75rem; }
+
+.flex { display: flex; gap: .5rem; }
+.flex-col { display: flex; flex-direction: column; gap: .5rem; }
+.items-center { align-items: center; }
+.justify-between { justify-content: space-between; }
+.justify-end { justify-content: flex-end; }
+.w-full { width: 100%; }
+
+.hr { height: 1px; background: var(--border); margin: .6rem 0; }
+
+.hint { color: var(--muted); font-size: 12px; margin-top: .5rem; }
+
+.kbd {
+  font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono";
+  background: #f3f4f6;
+  border: 1px solid var(--border);
+  border-bottom-color: #d1d5db;
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+
+
+/* 10) Responsive ---------------------------------------------------------- */
+
+@media (max-width: 1200px) {
+  .wb-split { grid-template-columns: 1fr 400px; }
+}
+
+@media (max-width: 1024px) {
+  .wb-split { grid-template-columns: 1fr; height: auto; }
+  .wb-right { min-height: 320px; }
+  .input { min-width: 220px; max-width: 100%; }
+}
+
+@media (prefers-color-scheme: dark) {
+  body { color: #e5e7eb; background: #0b1220; }
+  .wb-toolbar,
+  .wb-right { background: #0f172a; border-color: #1f2937; }
+  .wb-left { background: #0b1220; border-color: #1f2937; }
+  .placeholder, .hint, .muted { color: #9ca3af; }
+  .pdf-stage canvas { background: #111827; }
+  .bbox-rect { stroke: rgba(255, 194, 61, .95); fill: rgba(255, 194, 61, .18); }
+  button { background: #0f172a; border-color: #1f2937; color: #e5e7eb; }
+  button:hover { background: #111827; }
+  .primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+  thead th { background: #0b1220; border-bottom-color: #1f2937; }
+  th, td { border-bottom-color: #1f2937; }
+}
