@@ -21,17 +21,20 @@ import {
   type Box as TokenBox,
 } from "../../../lib/api";
 
+/* ========================================================================================
+   Small helpers
+======================================================================================== */
 function isEditableForCatalogKey(cat: PromCatalog | null, key: string): boolean {
   if (!cat) return true;
   const f = cat.fields.find((x) => x.key === key);
   if (!f) return true;
+  // enums are treated as locked (non-editable)
   const opts = (f as any)["enum"] as string[] | undefined;
   if (Array.isArray(opts) && opts.length > 0) return false;
   const t = (f as any).type ?? "string";
   return t === "string";
 }
 
-/* ---- helpers for optional auto-locate ---- */
 function norm(s: string): string {
   return (s || "")
     .toLowerCase()
@@ -82,10 +85,7 @@ function linePenalty(span: TokenBox[]) {
   const avg = hs.reduce((a, b) => a + b, 0) / Math.max(1, hs.length);
   return Math.max(0, yspread - avg * 0.6) / Math.max(1, avg);
 }
-
-// ---- replace your existing autoLocateByValue with this fully-typed version
 type Candidate = { score: number; page: number; span: TokenBox[] };
-
 function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 8) {
   const value = valueRaw?.trim();
   if (!value) return null;
@@ -94,7 +94,6 @@ function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 
   const target = looksNumeric ? normKeepDigits(value) : norm(value);
   if (!target) return null;
 
-  // group by page without iterating Map entries (keeps ES5 target happy)
   const byPage = new Map<number, TokenBox[]>();
   for (const t of allTokens) {
     const arr = byPage.get(t.page) || [];
@@ -103,7 +102,7 @@ function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 
   }
   byPage.forEach((arr) => arr.sort((a, b) => (a.y0 === b.y0 ? a.x0 - b.x0 : a.y0 - b.y0)));
 
-  let best: Candidate | null = null; // ✅ explicit, so it's never inferred as 'never'
+  let best: Candidate | null = null;
 
   byPage.forEach((toks, pg) => {
     const n = toks.length;
@@ -131,12 +130,13 @@ function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 
   });
 
   if (!best) return null;
-
   const rect = unionRect(best.span);
   return { page: best.page, rect, score: best.score };
 }
-/* ---------------------------------------- */
 
+/* ========================================================================================
+   Component
+======================================================================================== */
 export default function FieldLevelEditor() {
   // document
   const [docUrl, setDocUrl] = useState("");
@@ -157,12 +157,12 @@ export default function FieldLevelEditor() {
   const [fields, setFields] = useState<FieldDocState | null>(null);
   const [focusedKey, setFocusedKey] = useState<string>("");
 
-  // layout (optional)
+  // layout (draggable divider)
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [pdfPct, setPdfPct] = useState(68);
   const draggingSplit = useRef(false);
 
-  // debug preview
+  // debug preview of OCR crop
   const [lastCrop, setLastCrop] = useState<{ url?: string; text?: string } | null>(null);
 
   /* ---------- upload / paste ---------- */
@@ -213,7 +213,9 @@ export default function FieldLevelEditor() {
     (async () => {
       try {
         setProms(await listProms());
-      } catch {}
+      } catch {
+        setProms([]);
+      }
     })();
   }, []);
 
@@ -242,11 +244,16 @@ export default function FieldLevelEditor() {
     setFields(st);
   }
 
+  // Save all fields (on click)
+  async function saveAllFields() {
+    if (!fields) return;
+    setFields(await putFields(fields.doc_id, fields));
+  }
+
   // Focus a field -> show saved bbox or auto-locate
   function focusKey(k: string) {
     setFocusedKey(k);
     const f = fields?.fields.find((x) => x.key === k);
-
     // explicitly any, to avoid TS narrowing to 'never'
     const bbox: any = f && (f as any).bbox ? (f as any).bbox : null;
 
@@ -276,16 +283,10 @@ export default function FieldLevelEditor() {
     setRect(null);
   }
 
-  // save manual edits
-  async function saveAllFields() {
-    if (!fields) return;
-    setFields(await putFields(fields.doc_id, fields));
-  }
-
   // OCR + bind on commit
   async function onRectCommitted(rr: EditRect) {
     if (!focusedKey) {
-      alert("Select a field on the left, then adjust the box.");
+      alert("Select a field on the right, then adjust the pink box on the left.");
       return;
     }
     const editable = isEditableForCatalogKey(catalog, focusedKey);
@@ -299,7 +300,7 @@ export default function FieldLevelEditor() {
 
       setLastCrop({ url: res?.crop_url, text });
 
-      // immediate UI update
+      // optimistic UI update
       setFields((prev) =>
         prev
           ? {
@@ -319,7 +320,7 @@ export default function FieldLevelEditor() {
           : prev
       );
 
-      // persist
+      // persist to server (bind)
       const st = await bindField(docId, focusedKey, rr.page, rr);
       setFields(st);
       setRect(rr);
@@ -328,7 +329,7 @@ export default function FieldLevelEditor() {
     }
   }
 
-  // (optional) draggable divider
+  /* ---------- draggable divider ---------- */
   function onDividerMouseDown(e: React.MouseEvent) {
     e.preventDefault();
     draggingSplit.current = true;
@@ -499,7 +500,9 @@ export default function FieldLevelEditor() {
                         </td>
                         <td>{f.source || ""}</td>
                         <td>{f.confidence ? f.confidence.toFixed(2) : ""}</td>
-                        <td>{editable ? <span className="badge">Editable</span> : <span className="badge warn">Locked</span>}</td>
+                        <td>
+                          {editable ? <span className="badge">Editable</span> : <span className="badge warn">Locked</span>}
+                        </td>
                       </tr>
                     );
                   })}

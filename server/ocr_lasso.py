@@ -380,59 +380,52 @@ async def lasso_crop(req: LassoReq):
     if req.page < 1 or req.page > len(pdf):
         raise HTTPException(400, f"Page out of range: {req.page}")
 
-    # render the page at OCR resolution (same as when tokens were produced)
     pil = pdf[req.page - 1].render(scale=(dpi / 72)).to_pil()
     gray = ImageOps.autocontrast(pil.convert("L"))
 
-    # normalize incoming rect and add a light pad (small so we don't drift)
-    x0, y0, x1, y1 = float(req.x0), float(req.y0), float(req.x1), float(req.y1)
-    if x0 > x1: x0, x1 = x1, x0
-    if y0 > y1: y0, y1 = y1, y0
-    PAD = 4
-    X0 = max(0, int(round(x0)) - PAD)
-    Y0 = max(0, int(round(y0)) - PAD)
-    X1 = min(gray.width - 1, int(round(x1)) + PAD)
-    Y1 = min(gray.height - 1, int(round(y1)) + PAD)
+    # normalize rect
+    x0 = float(min(req.x0, req.x1))
+    y0 = float(min(req.y0, req.y1))
+    x1 = float(max(req.x0, req.x1))
+    y1 = float(max(req.y0, req.y1))
+
+    # pad a touch
+    pad = 4
+    X0 = max(0, int(x0 - pad))
+    Y0 = max(0, int(y0 - pad))
+    X1 = min(gray.width - 1, int(x1 + pad))
+    Y1 = min(gray.height - 1, int(y1 + pad))
 
     crop = gray.crop((X0, Y0, X1, Y1))
-
-    # upscale small crops a bit for Tesseract readability
-    if crop.width < 160 or crop.height < 40:
-        scale = 3 if max(crop.width, crop.height) < 70 else 2
+    # upscale small
+    if crop.width < 140 or crop.height < 40:
+        scale = 3 if max(crop.width, crop.height) < 60 else 2
         crop = crop.resize((crop.width * scale, crop.height * scale), Image.BICUBIC)
 
-    def ocr_try(psm: int, im: Image.Image) -> str:
+    def ocr(psm: int) -> str:
         cfg = f"--oem 1 --psm {psm} -c preserve_interword_spaces=1"
         return pytesseract.image_to_string(
-            im,
-            lang=meta.get("params", {}).get("lang", "eng"),
-            config=cfg,
+            crop, lang=meta.get("params", {}).get("lang", "eng"), config=cfg
         ).strip()
 
-    # try a couple of layouts
-    candidates = []
-    for p in (6, 7, 11):
-        s = ocr_try(p, crop)
-        candidates.append((len(s), s.count(" "), s))
+    cand = sorted(((len(t), t) for t in (ocr(6), ocr(7), ocr(11))), reverse=True)
+    best = cand[0][1] if cand else ""
 
-    # pick the longest, more space-rich
-    candidates.sort(reverse=True)
-    best = candidates[0][2] if candidates else ""
-
-    # save the actual crop as a debug image you can view from the UI
-    dbg_name = f"debug_crop_{int(time.time())}.png"
-    dbg_path = doc_dir(req.doc_id) / dbg_name
+    # save crop for UI verification
+    crop_path = doc_dir(req.doc_id) / "last_crop.png"
     try:
-        crop.save(dbg_path, "PNG")
+        crop.save(crop_path)
+        crop_url = f"/data/{req.doc_id}/last_crop.png"
     except Exception:
-        pass
+        crop_url = None
 
     return {
         "text": best,
         "rect_used": {"page": req.page, "x0": X0, "y0": Y0, "x1": X1, "y1": Y1},
         "page_size": {"width": gray.width, "height": gray.height},
-        "crop_url": f"/data/{req.doc_id}/{dbg_name}",
+        "crop_url": crop_url,
     }
+
 
 # ---- PROM ----
 @router.get("/prom")
