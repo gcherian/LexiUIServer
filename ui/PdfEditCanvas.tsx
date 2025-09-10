@@ -1,225 +1,309 @@
 // File: src/tsp4/components/lasso/PdfEditCanvas.tsx
 import React, { useEffect, useLayoutEffect, useRef } from "react";
-import { GlobalWorkerOptions, getDocument, type PDFDocumentProxy, type PDFPageProxy } from "pdfjs-dist";
+import {
+  GlobalWorkerOptions,
+  getDocument,
+  type PDFDocumentProxy,
+  type PDFPageProxy,
+} from "pdfjs-dist";
 import "pdfjs-dist/web/pdf_viewer.css";
 
-GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
+/** Vite + pdfjs-dist v4 worker (MJS!) */
+GlobalWorkerOptions.workerSrc = new URL(
+  "pdfjs-dist/build/pdf.worker.min.mjs",
+  import.meta.url
+).toString();
 
-export type TokenBox = { page: number; x0: number; y0: number; x1: number; y1: number; text?: string };
+export type TokenBox = {
+  page: number;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  text?: string;
+};
+
 export type EditRect = { page: number; x0: number; y0: number; x1: number; y1: number };
 
 type Props = {
   docUrl: string;
   page: number;
+
+  /** OCR/server coordinate space for this page (from /lasso/doc/{id}/meta) */
   serverW: number;
   serverH: number;
+
   tokens: TokenBox[];
   rect: EditRect | null;
   showTokenBoxes: boolean;
   editable: boolean;
+
+  /** live change while dragging */
   onRectChange: (r: EditRect | null) => void;
+  /** commit on mouseup */
   onRectCommit: (r: EditRect) => void;
+
+  /** Optional display zoom (does not affect OCR coords). Default 1.0 */
+  zoom?: number;
 };
 
-export default function PdfEditCanvas(props: Props) {
-  const { docUrl, page, serverW, serverH, tokens, rect, showTokenBoxes, editable, onRectChange, onRectCommit } = props;
+export default function PdfEditCanvas({
+  docUrl,
+  page,
+  serverW,
+  serverH,
+  tokens,
+  rect,
+  showTokenBoxes,
+  editable,
+  onRectChange,
+  onRectCommit,
+  zoom = 1,
+}: Props) {
+  const pdfRef = useRef<PDFDocumentProxy | null>(null);
+  const pageRef = useRef<PDFPageProxy | null>(null);
 
-  const cRef = useRef<HTMLCanvasElement | null>(null);
-  const overlay = useRef<HTMLDivElement | null>(null);
+  const baseCanvas = useRef<HTMLCanvasElement | null>(null);
+  const overlayRef = useRef<HTMLDivElement | null>(null);
 
-  const mode = useRef<"idle" | "lasso" | "move" | "resize">("idle");
-  const start = useRef<{ x: number; y: number } | null>(null);
-  const now = useRef<{ x: number; y: number } | null>(null);
-  const handle = useRef<"nw"|"n"|"ne"|"e"|"se"|"s"|"sw"|"w"|null>(null);
+  /** For stable pointer math during drags (snapshot of overlay client rect) */
+  const overlayBox = useRef<DOMRect | null>(null);
 
-  // Render page exactly at OCR resolution (so mapping is 1:1, but we scale with CSS automatically)
+  /** Drag state eliminates “acceleration” by always diffing from the start */
+  type DragState =
+    | { mode: "none" }
+    | { mode: "new"; startX: number; startY: number }
+    | { mode: "move"; startX: number; startY: number; orig: EditRect };
+  const drag = useRef<DragState>({ mode: "none" });
+
+  // ---------------- Rendering ----------------
   useEffect(() => {
-    let off = false;
+    let cancelled = false;
     (async () => {
-      const pdf: PDFDocumentProxy = await getDocument(docUrl).promise;
-      if (off) return;
-      const pg: PDFPageProxy = await pdf.getPage(page);
-      if (off) return;
+      if (!docUrl) return;
+      const doc = await getDocument(docUrl).promise;
+      if (cancelled) return;
+      pdfRef.current = doc;
 
-      const natW = pg.view[2];
-      const scale = serverW / natW;
-      const vp = pg.getViewport({ scale, rotation: 0 });
+      const pg = await doc.getPage(page);
+      if (cancelled) return;
+      pageRef.current = pg;
 
-      const c = cRef.current!;
+      // Use page's inherent rotation; mapping stays correct because we always convert via overlay snapshot.
+      const rot = (pg.rotate || 0) % 360;
+      const vp1 = pg.getViewport({ scale: 1, rotation: rot });
+      const maxDisplay = 1400; // soft cap
+      const baseScale = Math.min(1, maxDisplay / Math.max(vp1.width, vp1.height));
+      const vp = pg.getViewport({ scale: baseScale * zoom, rotation: rot });
+
+      const c = baseCanvas.current!;
       const ctx = c.getContext("2d")!;
-      c.width = serverW;
-      c.height = serverH;
-
-      // presentational width to keep doc stable inside container
-      c.style.maxWidth = "100%";
-      c.style.height = "auto";
+      c.width = Math.floor(vp.width);
+      c.height = Math.floor(vp.height);
+      c.style.width = `${c.width}px`;
+      c.style.height = `${c.height}px`;
 
       await pg.render({ canvasContext: ctx, viewport: vp }).promise;
-      if (overlay.current) {
-        overlay.current.style.width = `${c.clientWidth}px`;
-        overlay.current.style.height = `${c.clientHeight}px`;
+
+      if (overlayRef.current) {
+        overlayRef.current.style.width = c.style.width;
+        overlayRef.current.style.height = c.style.height;
       }
-      draw();
+
+      drawOverlay();
     })();
-    return () => { off = true; };
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [docUrl, page, serverW, serverH]);
+  }, [docUrl, page, zoom]);
 
-  useLayoutEffect(() => { draw(); /* eslint-disable-next-line */ }, [tokens, rect, showTokenBoxes]);
+  /** Keep overlay in lockstep with canvas size (resizes, split drag, etc.) */
+  useLayoutEffect(() => {
+    const c = baseCanvas.current;
+    const o = overlayRef.current;
+    if (!c || !o) return;
+    const ro = new ResizeObserver(() => {
+      const r = c.getBoundingClientRect();
+      o.style.width = `${Math.floor(r.width)}px`;
+      o.style.height = `${Math.floor(r.height)}px`;
+      drawOverlay();
+    });
+    ro.observe(c);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  function R() { return overlay.current!.getBoundingClientRect(); }
-  function css2ocr(xcss: number, ycss: number) {
-    const r = R(); const sx = serverW / r.width; const sy = serverH / r.height;
-    return { x: Math.max(0, Math.min(Math.round(xcss * sx), serverW - 1)), y: Math.max(0, Math.min(Math.round(ycss * sy), serverH - 1)) };
+  // ---------------- Pointer helpers ----------------
+  function cssToOcr(xCss: number, yCss: number) {
+    const R = overlayBox.current!;
+    const sx = serverW / R.width;
+    const sy = serverH / R.height;
+    const X = Math.max(0, Math.min(serverW - 1, Math.round(xCss * sx)));
+    const Y = Math.max(0, Math.min(serverH - 1, Math.round(yCss * sy)));
+    return { X, Y };
   }
-  function ocr2css(x: number, y: number) {
-    const r = R(); const sx = r.width / serverW; const sy = r.height / serverH;
-    return { x: x * sx, y: y * sy };
-  }
-  function ocrRect2css(rr: {x0:number;y0:number;x1:number;y1:number}) {
-    const a = ocr2css(rr.x0, rr.y0), b = ocr2css(rr.x1, rr.y1);
-    return { left: Math.min(a.x,b.x), top: Math.min(a.y,b.y), width: Math.abs(b.x-a.x), height: Math.abs(b.y-a.y) };
+
+  function hitRectInCss(px: number, py: number): boolean {
+    if (!overlayRef.current || !rect) return false;
+    const R = overlayRef.current.getBoundingClientRect();
+    const sx = R.width / serverW;
+    const sy = R.height / serverH;
+    const rx0 = Math.min(rect.x0, rect.x1) * sx;
+    const ry0 = Math.min(rect.y0, rect.y1) * sy;
+    const rx1 = Math.max(rect.x0, rect.x1) * sx;
+    const ry1 = Math.max(rect.y0, rect.y1) * sy;
+    return px >= rx0 && px <= rx1 && py >= ry0 && py <= ry1;
   }
 
-  function draw() {
-    const host = overlay.current; if (!host) return;
-    // sync overlay size to canvas client box
-    const c = cRef.current!;
-    host.style.width = `${c.clientWidth}px`;
-    host.style.height = `${c.clientHeight}px`;
+  // ---------------- Mouse events (stable drag/move) ----------------
+  function onMouseDown(e: React.MouseEvent) {
+    if (!editable || !overlayRef.current) return;
+    overlayBox.current = overlayRef.current.getBoundingClientRect();
 
-    host.innerHTML = "";
+    const px = e.clientX - overlayBox.current.left;
+    const py = e.clientY - overlayBox.current.top;
+
+    if (rect && hitRectInCss(px, py)) {
+      drag.current = { mode: "move", startX: e.clientX, startY: e.clientY, orig: rect };
+    } else {
+      drag.current = { mode: "new", startX: e.clientX, startY: e.clientY };
+    }
+    e.preventDefault();
+  }
+
+  function onMouseMove(e: React.MouseEvent) {
+    if (drag.current.mode === "none" || !overlayBox.current) return;
+
+    const R = overlayBox.current;
+    const dx = e.clientX - drag.current.startX;
+    const dy = e.clientY - drag.current.startY;
+
+    if (drag.current.mode === "new") {
+      const sx = Math.min(drag.current.startX, e.clientX) - R.left;
+      const sy = Math.min(drag.current.startY, e.clientY) - R.top;
+      const w = Math.abs(dx);
+      const h = Math.abs(dy);
+      const a = cssToOcr(sx, sy);
+      const b = cssToOcr(sx + w, sy + h);
+      onRectChange({
+        page,
+        x0: Math.min(a.X, b.X),
+        y0: Math.min(a.Y, b.Y),
+        x1: Math.max(a.X, b.X),
+        y1: Math.max(a.Y, b.Y),
+      });
+      return;
+    }
+
+    if (drag.current.mode === "move") {
+      const sx = serverW / R.width;
+      const sy = serverH / R.height;
+      const dX = Math.round(dx * sx);
+      const dY = Math.round(dy * sy);
+      const o = drag.current.orig;
+      const nr: EditRect = {
+        page,
+        x0: clamp(o.x0 + dX, 0, serverW - 1),
+        y0: clamp(o.y0 + dY, 0, serverH - 1),
+        x1: clamp(o.x1 + dX, 0, serverW - 1),
+        y1: clamp(o.y1 + dY, 0, serverH - 1),
+      };
+      onRectChange(nr);
+      return;
+    }
+  }
+
+  function onMouseUp() {
+    if (drag.current.mode !== "none" && rect) {
+      onRectCommit(rect);
+    }
+    drag.current = { mode: "none" };
+  }
+
+  // ---------------- Overlay drawing ----------------
+  function drawOverlay() {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    overlay.innerHTML = "";
 
     if (showTokenBoxes) {
       for (const t of tokens) {
-        if (t.page !== page) continue;
         const d = document.createElement("div");
         d.className = "tok";
-        place(d, ocrRect2css({ x0: t.x0, y0: t.y0, x1: t.x1, y1: t.y1 }));
-        host.appendChild(d);
+        placeCss(d, t.x0, t.y0, t.x1, t.y1);
+        overlay.appendChild(d);
       }
     }
 
     if (rect && rect.page === page) {
       const d = document.createElement("div");
       d.className = "pink";
-      place(d, ocrRect2css({ x0: rect.x0, y0: rect.y0, x1: rect.x1, y1: rect.y1 }));
-      for (const pos of ["nw","n","ne","e","se","s","sw","w"] as const) {
-        const h = document.createElement("div"); h.className = `handle ${pos}`; d.appendChild(h);
-      }
-      host.appendChild(d);
+      placeCss(d, rect.x0, rect.y0, rect.x1, rect.y1);
+      overlay.appendChild(d);
     }
 
-    if (mode.current === "lasso" && start.current && now.current) {
-      const r = R();
-      const x0 = Math.min(start.current.x, now.current.x) - r.left;
-      const y0 = Math.min(start.current.y, now.current.y) - r.top;
-      const x1 = Math.max(start.current.x, now.current.x) - r.left;
-      const y1 = Math.max(start.current.y, now.current.y) - r.top;
-      const d = document.createElement("div");
-      d.className = "pink live";
-      place(d, { left: clamp(x0,0,r.width), top: clamp(y0,0,r.height), width: clamp(x1-x0,0,r.width), height: clamp(y1-y0,0,r.height) });
-      host.appendChild(d);
-    }
+    // Live drag box (visual only) is handled by onRectChange -> re-render -> above
   }
 
-  function place(node: HTMLDivElement, css: {left:number;top:number;width:number;height:number}) {
-    node.style.left = `${css.left}px`;
-    node.style.top = `${css.top}px`;
-    node.style.width = `${css.width}px`;
-    node.style.height = `${css.height}px`;
-  }
-  const clamp = (v:number,lo:number,hi:number)=>Math.max(lo,Math.min(v,hi));
+  function placeCss(node: HTMLDivElement, x0: number, y0: number, x1: number, y1: number) {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    const R = overlay.getBoundingClientRect();
+    const sx = R.width / serverW;
+    const sy = R.height / serverH;
 
-  function hitHandle(e: React.MouseEvent) {
-    if (!overlay.current || !rect || rect.page !== page) return null;
-    const r = ocrRect2css(rect);
-    const Rr = R();
-    const x = e.clientX - Rr.left, y = e.clientY - Rr.top, pad = 8;
-    const inBox = (lx:number,ty:number,w:number,h:number)=> x>=lx && x<=lx+w && y>=ty && y<=ty+h;
-    const hmap = {
-      nw: {x:r.left-pad, y:r.top-pad}, n:{x:r.left+r.width/2-pad, y:r.top-pad},
-      ne:{x:r.left+r.width-pad, y:r.top-pad}, e:{x:r.left+r.width-pad, y:r.top+r.height/2-pad},
-      se:{x:r.left+r.width-pad, y:r.top+r.height-pad}, s:{x:r.left+r.width/2-pad, y:r.top+r.height-pad},
-      sw:{x:r.left-pad, y:r.top+r.height-pad}, w:{x:r.left-pad, y:r.top+r.height/2-pad}
-    } as const;
-    for (const k of Object.keys(hmap) as (keyof typeof hmap)[]) {
-      const p = hmap[k]; if (inBox(p.x,p.y,pad*2,pad*2)) return k;
-    }
-    if (inBox(r.left, r.top, r.width, r.height)) return "e"; // sentinel for move
-    return null;
+    node.style.position = "absolute";
+    node.style.left = `${Math.min(x0, x1) * sx}px`;
+    node.style.top = `${Math.min(y0, y1) * sy}px`;
+    node.style.width = `${Math.abs(x1 - x0) * sx}px`;
+    node.style.height = `${Math.abs(y1 - y0) * sy}px`;
   }
 
-  function onMouseDown(e: React.MouseEvent) {
-    if (!editable || !overlay.current) return;
-    e.preventDefault();
-    const h = hitHandle(e);
-    if (h) {
-      if (h === "e") { mode.current = "move"; start.current = { x: e.clientX, y: e.clientY }; }
-      else { mode.current = "resize"; handle.current = h; start.current = { x: e.clientX, y: e.clientY }; }
-    } else {
-      mode.current = "lasso"; start.current = { x: e.clientX, y: e.clientY }; now.current = { x: e.clientX, y: e.clientY };
-    }
-    draw();
-  }
-
-  function onMouseMove(e: React.MouseEvent) {
-    if (!editable || !start.current) return;
-    if (mode.current === "lasso") { now.current = { x: e.clientX, y: e.clientY }; draw(); return; }
-    const Rr = R();
-    if (mode.current === "move" && rect) {
-      const dx = e.clientX - start.current.x, dy = e.clientY - start.current.y;
-      const nx0 = css2ocr(ocrRect2css(rect).left + dx, ocrRect2css(rect).top + dy).x;
-      const ny0 = css2ocr(ocrRect2css(rect).left + dx, ocrRect2css(rect).top + dy).y;
-      const w = rect.x1 - rect.x0, h = rect.y1 - rect.y0;
-      const next: EditRect = { page, x0: clamp(nx0,0,serverW-w-1), y0: clamp(ny0,0,serverH-h-1), x1: clamp(nx0+w,0,serverW-1), y1: clamp(ny0+h,0,serverH-1) };
-      onRectChange(next); draw(); return;
-    }
-    if (mode.current === "resize" && rect) {
-      const css = ocrRect2css(rect);
-      let x0 = css.left, y0 = css.top, x1 = css.left + css.width, y1 = css.top + css.height;
-      const nx = clamp(e.clientX - Rr.left, 0, Rr.width);
-      const ny = clamp(e.clientY - Rr.top, 0, Rr.height);
-      switch (handle.current) {
-        case "nw": x0 = nx; y0 = ny; break; case "n": y0 = ny; break; case "ne": x1 = nx; y0 = ny; break;
-        case "e": x1 = nx; break; case "se": x1 = nx; y1 = ny; break; case "s": y1 = ny; break;
-        case "sw": x0 = nx; y1 = ny; break; case "w": x0 = nx; break;
-      }
-      const a = css2ocr(x0, y0), b = css2ocr(x1, y1);
-      onRectChange({ page, x0: Math.min(a.x,b.x), y0: Math.min(a.y,b.y), x1: Math.max(a.x,b.x), y1: Math.max(a.y,b.y) });
-      draw(); return;
-    }
-  }
-
-  function onMouseUp(e: React.MouseEvent) {
-    if (!editable) return;
-    const st = start.current; start.current = null; now.current = null;
-    if (mode.current === "lasso" && overlay.current && st) {
-      const Rr = R();
-      const x0 = clamp(Math.min(st.x, e.clientX) - Rr.left, 0, Rr.width);
-      const y0 = clamp(Math.min(st.y, e.clientY) - Rr.top,  0, Rr.height);
-      const x1 = clamp(Math.max(st.x, e.clientX) - Rr.left, 0, Rr.width);
-      const y1 = clamp(Math.max(st.y, e.clientY) - Rr.top,  0, Rr.height);
-      const a = css2ocr(x0, y0), b = css2ocr(x1, y1);
-      const rr: EditRect = { page, x0: Math.min(a.x,b.x), y0: Math.min(a.y,b.y), x1: Math.max(a.x,b.x), y1: Math.max(a.y,b.y) };
-      onRectChange(rr); onRectCommit(rr);
-    } else if ((mode.current === "move" || mode.current === "resize") && rect) {
-      onRectCommit(rect);
-    }
-    mode.current = "idle"; draw();
-  }
+  useEffect(() => {
+    drawOverlay();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tokens, rect, showTokenBoxes, page, serverW, serverH]);
 
   return (
     <div className="pdf-stage" style={{ position: "relative", overflow: "auto" }}>
-      <canvas ref={cRef} />
+      <canvas ref={baseCanvas} />
       <div
-        ref={overlay}
+        ref={overlayRef}
         className="overlay"
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
-        style={{ position: "absolute", inset: 0, background: "transparent", cursor: editable ? "crosshair" : "default", userSelect: "none" }}
+        style={{
+          position: "absolute",
+          inset: 0,
+          background: "transparent",
+          cursor: editable
+            ? drag.current.mode === "move"
+              ? "grabbing"
+              : "crosshair"
+            : "default",
+          userSelect: "none",
+        }}
       />
+      <style>{`
+        .overlay .tok {
+          border: 1px solid rgba(255, 165, 0, 0.85);
+          background: rgba(255, 165, 0, 0.15);
+          pointer-events: none;
+        }
+        .overlay .pink {
+          border: 2px solid rgba(236, 72, 153, 0.95);
+          background: rgba(236, 72, 153, 0.18);
+          box-shadow: 0 0 0 1px rgba(236,72,153,0.25) inset;
+          pointer-events: none;
+        }
+      `}</style>
     </div>
   );
+}
+
+// ---------------- utils ----------------
+function clamp(v: number, lo: number, hi: number) {
+  return Math.max(lo, Math.min(hi, v));
 }
