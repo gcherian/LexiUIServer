@@ -20,7 +20,7 @@ import {
   type PromCatalog,
 } from "../../../lib/api";
 
-/* ----------------------- helpers & types ----------------------- */
+/* ---------------- helpers (typed to avoid 'never') ---------------- */
 
 type LocateRect = { x0: number; y0: number; x1: number; y1: number };
 type LocateHit = { page: number; rect: LocateRect; score: number };
@@ -39,10 +39,9 @@ function normKeepDigits(s: string): string {
   return (s || "").toLowerCase().normalize("NFKC").replace(/[,$]/g, "").replace(/\s+/g, " ").trim();
 }
 function levRatio(a: string, b: string): number {
-  const m = a.length,
-    n = b.length;
+  const m = a.length, n = b.length;
   if (!m && !n) return 1;
-  const dp = new Array(n + 1);
+  const dp: number[] = new Array(n + 1);
   for (let j = 0; j <= n; j++) dp[j] = j;
   for (let i = 1; i <= m; i++) {
     let prev = dp[0];
@@ -55,11 +54,8 @@ function levRatio(a: string, b: string): number {
   }
   return 1 - dp[n] / Math.max(1, Math.max(m, n));
 }
-function unionRect(span: TokenBox[]) {
-  let x0 = Infinity,
-    y0 = Infinity,
-    x1 = -Infinity,
-    y1 = -Infinity;
+function unionRect(span: TokenBox[]): LocateRect {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (const t of span) {
     x0 = Math.min(x0, t.x0);
     y0 = Math.min(y0, t.y0);
@@ -71,18 +67,20 @@ function unionRect(span: TokenBox[]) {
 function linePenalty(span: TokenBox[]) {
   if (span.length <= 1) return 0;
   const ys = span.map((t) => (t.y0 + t.y1) / 2).sort((a, b) => a - b);
-  const yspread = ys[ys.length - 1] - ys[0];
+  const spread = ys[ys.length - 1] - ys[0];
   const hs = span.map((t) => t.y1 - t.y0);
   const avg = hs.reduce((a, b) => a + b, 0) / Math.max(1, hs.length);
-  return Math.max(0, yspread - avg * 0.6) / Math.max(1, avg);
+  return Math.max(0, spread - avg * 0.6) / Math.max(1, avg);
 }
 function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 8): LocateHit | null {
   const value = valueRaw?.trim();
   if (!value) return null;
+
   const looksNumeric = /^[\s\-$€£₹,.\d/]+$/.test(value);
   const target = looksNumeric ? normKeepDigits(value) : norm(value);
   if (!target) return null;
 
+  // group tokens by page
   const byPage = new Map<number, TokenBox[]>();
   for (const t of allTokens) {
     const arr = byPage.get(t.page) || [];
@@ -119,7 +117,6 @@ function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 
   });
 
   if (!best) return null;
-
   const rect = unionRect(best.span);
   return { page: best.page, rect, score: best.score };
 }
@@ -129,12 +126,12 @@ function isEditableForCatalogKey(cat: PromCatalog | null, key: string): boolean 
   const f = cat.fields.find((x) => x.key === key);
   if (!f) return true;
   const opts = (f as any)["enum"] as string[] | undefined;
-  if (Array.isArray(opts) && opts.length > 0) return false;
+  if (Array.isArray(opts) && opts.length > 0) return false; // enums locked
   const t = (f as any).type ?? "string";
   return t === "string";
 }
 
-/* ----------------------- component ----------------------------- */
+/* ---------------- component ---------------- */
 
 export default function FieldLevelEditor() {
   // Document/page
@@ -149,10 +146,10 @@ export default function FieldLevelEditor() {
   const [showBoxes, setShowBoxes] = useState(true);
   const [lastCrop, setLastCrop] = useState<{ url?: string; text?: string } | null>(null);
 
-  // Rect (pink)
+  // Pink rect
   const [rect, setRect] = useState<EditRect | null>(null);
 
-  // PROM + field state
+  // PROM + fields
   const [proms, setProms] = useState<Array<{ doctype: string; file: string }>>([]);
   const [doctype, setDoctypeSel] = useState("");
   const [catalog, setCatalog] = useState<PromCatalog | null>(null);
@@ -163,18 +160,6 @@ export default function FieldLevelEditor() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [pdfPct, setPdfPct] = useState(70);
   const draggingSplit = useRef(false);
-
-  // Upload
-  async function onUpload(ev: React.ChangeEvent<HTMLInputElement>) {
-    const f = ev.target.files?.[0];
-    if (!f) return;
-    try {
-      const res = await uploadPdf(f);
-      await bootstrap(res.doc_id, res.annotated_tokens_url);
-    } finally {
-      (ev.target as HTMLInputElement).value = "";
-    }
-  }
 
   async function bootstrap(id: string, url: string) {
     setDocId(id);
@@ -192,6 +177,18 @@ export default function FieldLevelEditor() {
     setLastCrop(null);
   }
 
+  // Upload
+  async function onUpload(ev: React.ChangeEvent<HTMLInputElement>) {
+    const f = ev.target.files?.[0];
+    if (!f) return;
+    try {
+      const res = await uploadPdf(f);
+      await bootstrap(res.doc_id, res.annotated_tokens_url);
+    } finally {
+      (ev.target as HTMLInputElement).value = "";
+    }
+  }
+
   // Paste /data/{doc}/original.pdf
   useEffect(() => {
     const id = docIdFromUrl(docUrl);
@@ -202,7 +199,7 @@ export default function FieldLevelEditor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [docUrl]);
 
-  // PROM list once
+  // PROM list
   useEffect(() => {
     (async () => {
       try {
@@ -221,7 +218,6 @@ export default function FieldLevelEditor() {
     try {
       setFields(await getFields(docId));
     } catch {
-      // seed
       const cat = await getProm(dt);
       setCatalog(cat);
       setFields({
@@ -235,14 +231,14 @@ export default function FieldLevelEditor() {
     setCatalog(await getProm(dt));
   }
 
-  // Extract via mock
+  // Extract mock
   async function onExtract() {
     if (!docId || !doctype) return;
     const st = await ecmExtract(docId, doctype);
     setFields(st);
   }
 
-  // Focus a field to show its pink box / auto locate
+  // Focus a key → show pink box if known or try auto-locate by current value
   function focusKey(k: string) {
     setFocusedKey(k);
     const f = fields?.fields.find((x) => x.key === k);
@@ -278,7 +274,7 @@ export default function FieldLevelEditor() {
     setFields(await putFields(fields.doc_id, fields));
   }
 
-  // Lasso commit -> OCR -> update + bind
+  // Lasso commit → OCR → live + persist bind
   async function onRectCommitted(rr: EditRect) {
     if (!focusedKey) {
       alert("Select a field on the right first.");
@@ -322,23 +318,24 @@ export default function FieldLevelEditor() {
     }
   }
 
-  // Split: drag divider
-  function onDividerMouseDown(e: React.MouseEvent) {
+  // Resizable split
+  const [leftPct, setLeftPct] = useState(70);
+  const dragging = useRef(false);
+  function onDividerDown(e: React.MouseEvent) {
     e.preventDefault();
-    draggingSplit.current = true;
+    dragging.current = true;
     document.body.style.cursor = "col-resize";
     window.addEventListener("mousemove", onDividerMove);
     window.addEventListener("mouseup", onDividerUp, { once: true });
   }
   function onDividerMove(e: MouseEvent) {
-    if (!draggingSplit.current || !containerRef.current) return;
+    if (!dragging.current || !containerRef.current) return;
     const r = containerRef.current.getBoundingClientRect();
     const x = e.clientX - r.left;
-    const pct = Math.max(45, Math.min(90, (x / r.width) * 100));
-    setPdfPct(Math.round(pct));
+    setLeftPct(Math.max(45, Math.min(90, (x / r.width) * 100)));
   }
   function onDividerUp() {
-    draggingSplit.current = false;
+    dragging.current = false;
     document.body.style.cursor = "";
     window.removeEventListener("mousemove", onDividerMove);
   }
@@ -365,7 +362,7 @@ export default function FieldLevelEditor() {
 
       <div className="wb-split resizable" ref={containerRef}>
         {/* LEFT: PDF */}
-        <div className="wb-left" style={{ flexBasis: `${pdfPct}%` }}>
+        <div className="wb-left" style={{ flexBasis: `${leftPct}%` }}>
           {docUrl ? (
             <>
               <div className="toolbar-inline">
@@ -409,10 +406,10 @@ export default function FieldLevelEditor() {
         </div>
 
         {/* Divider */}
-        <div className="wb-divider" onMouseDown={onDividerMouseDown} title="Drag to resize" />
+        <div className="wb-divider" onMouseDown={onDividerDown} title="Drag to resize" />
 
         {/* RIGHT: Fields */}
-        <div className="wb-right" style={{ flexBasis: `${100 - pdfPct}%` }}>
+        <div className="wb-right" style={{ flexBasis: `${100 - leftPct}%` }}>
           <div className="row">
             <label>Doctype</label>
             <select value={doctype} onChange={(e) => onSelectDoctype(e.target.value || "")} disabled={!docId}>

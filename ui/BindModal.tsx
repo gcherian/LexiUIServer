@@ -3,16 +3,6 @@ import React from "react";
 type Props = {
   open: boolean;
   onClose: () => void;
-  // kept for compatibility; not used by the streamlined inline flow
-  docId?: string;
-  docUrl?: string;
-  page?: number;
-  serverW?: number;
-  serverH?: number;
-  allKeys?: string[];
-  initialKey?: string;
-  box?: any;
-  onBound?: (state: any) => void;
 };
 
 export default function BindModal({ open, onClose }: Props) {

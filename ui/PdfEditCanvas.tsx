@@ -7,8 +7,9 @@ import {
 } from "pdfjs-dist";
 import "pdfjs-dist/web/pdf_viewer.css";
 
+/** Vite + pdfjs-dist v4 worker (MJS!) */
 GlobalWorkerOptions.workerSrc = new URL(
-  "pdfjs-dist/build/pdf.worker.min.js",
+  "pdfjs-dist/build/pdf.worker.min.mjs",
   import.meta.url
 ).toString();
 
@@ -27,7 +28,7 @@ type Props = {
   docUrl: string;
   page: number;
 
-  /** OCR/server coordinate space for this page (width/height from /lasso/doc/{id}/meta) */
+  /** OCR/server coordinate space for this page (from /lasso/doc/{id}/meta) */
   serverW: number;
   serverH: number;
 
@@ -36,11 +37,8 @@ type Props = {
   showTokenBoxes: boolean;
   editable: boolean;
 
-  /** Live rect while dragging and when restored (pink box). */
-  onRectChange: (r: EditRect | null) => void;
-
-  /** Commit: fire OCR/bind upstream. */
-  onRectCommit: (r: EditRect) => void;
+  onRectChange: (r: EditRect | null) => void; // live
+  onRectCommit: (r: EditRect) => void;        // mouseup commit
 };
 
 export default function PdfEditCanvas({
@@ -58,31 +56,27 @@ export default function PdfEditCanvas({
   const pdfRef = useRef<PDFDocumentProxy | null>(null);
   const pageRef = useRef<PDFPageProxy | null>(null);
 
-  const wrapRef = useRef<HTMLDivElement | null>(null); // scroll container
-  const baseCanvas = useRef<HTMLCanvasElement | null>(null); // rendered pdf bitmap
-  const overlayRef = useRef<HTMLDivElement | null>(null); // interactive overlay
+  const baseCanvas = useRef<HTMLCanvasElement | null>(null);
+  const overlayRef = useRef<HTMLDivElement | null>(null);
 
   const dragStart = useRef<{ x: number; y: number } | null>(null);
   const dragNow = useRef<{ x: number; y: number } | null>(null);
 
-  // --- Render page to canvas -------------------------------------------------
+  // Render page bitmap. We render with rotation=0 so OCR coords == bitmap coords.
   useEffect(() => {
-    let stop = false;
-
+    let cancelled = false;
     (async () => {
       if (!docUrl) return;
       const doc = await getDocument(docUrl).promise;
-      if (stop) return;
+      if (cancelled) return;
       pdfRef.current = doc;
 
       const pg = await doc.getPage(page);
-      if (stop) return;
+      if (cancelled) return;
       pageRef.current = pg;
 
-      // NOTE: render with rotation = 0 so OCR coords match the bitmap directly.
-      const v1 = pg.getViewport({ scale: 1, rotation: 0 });
-      // keep the page reasonably sized for the UI; we only need a visual
-      const scale = Math.min(1, 1400 / Math.max(v1.width, v1.height));
+      const vp1 = pg.getViewport({ scale: 1, rotation: 0 });
+      const scale = Math.min(1, 1400 / Math.max(vp1.width, vp1.height));
       const vp = pg.getViewport({ scale, rotation: 0 });
 
       const c = baseCanvas.current!;
@@ -99,32 +93,26 @@ export default function PdfEditCanvas({
         overlayRef.current.style.height = c.style.height;
       }
 
-      drawOverlay(); // initial overlay
+      drawOverlay();
     })();
-
     return () => {
-      stop = true;
+      cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [docUrl, page]);
 
-  // --- Mouse handlers (lasso) -----------------------------------------------
   function onMouseDown(e: React.MouseEvent) {
-    if (!editable) return;
-    if (!overlayRef.current) return;
+    if (!editable || !overlayRef.current) return;
     e.preventDefault();
     dragStart.current = { x: e.clientX, y: e.clientY };
     dragNow.current = { x: e.clientX, y: e.clientY };
     drawOverlay();
   }
-
   function onMouseMove(e: React.MouseEvent) {
-    if (!editable) return;
-    if (!dragStart.current) return;
+    if (!editable || !dragStart.current) return;
     dragNow.current = { x: e.clientX, y: e.clientY };
     drawOverlay();
   }
-
   function onMouseUp() {
     if (!editable) return;
     const start = dragStart.current;
@@ -132,22 +120,20 @@ export default function PdfEditCanvas({
     dragStart.current = null;
     dragNow.current = null;
     drawOverlay();
-
     if (!start || !now) return;
-    if (!overlayRef.current || !baseCanvas.current) return;
+    if (!overlayRef.current) return;
 
-    // Use the overlay's client rect (NO manual scroll offsets) – it tracks the canvas.
-    const r = overlayRef.current.getBoundingClientRect();
+    // Use overlay client rect (tracks canvas; no manual scroll math)
+    const R = overlayRef.current.getBoundingClientRect();
+    const x0css = Math.max(0, Math.min(Math.min(start.x, now.x) - R.left, R.width));
+    const y0css = Math.max(0, Math.min(Math.min(start.y, now.y) - R.top, R.height));
+    const x1css = Math.max(0, Math.min(Math.max(start.x, now.x) - R.left, R.width));
+    const y1css = Math.max(0, Math.min(Math.max(start.y, now.y) - R.top, R.height));
 
-    // CSS coords inside overlay
-    const x0css = Math.max(0, Math.min(Math.min(start.x, now.x) - r.left, r.width));
-    const y0css = Math.max(0, Math.min(Math.min(start.y, now.y) - r.top, r.height));
-    const x1css = Math.max(0, Math.min(Math.max(start.x, now.x) - r.left, r.width));
-    const y1css = Math.max(0, Math.min(Math.max(start.y, now.y) - r.top, r.height));
+    // CSS -> OCR px (linear scale; rotation was 0 at render)
+    const sx = serverW / R.width;
+    const sy = serverH / R.height;
 
-    // CSS -> OCR pixels (simple scale; we rendered rotation=0)
-    const sx = serverW / r.width;
-    const sy = serverH / r.height;
     const X0 = Math.floor(Math.min(x0css, x1css) * sx);
     const Y0 = Math.floor(Math.min(y0css, y1css) * sy);
     const X1 = Math.ceil(Math.max(x0css, x1css) * sx);
@@ -160,20 +146,16 @@ export default function PdfEditCanvas({
       x1: Math.max(0, Math.min(X1, serverW - 1)),
       y1: Math.max(0, Math.min(Y1, serverH - 1)),
     };
-
     onRectChange(rr);
     onRectCommit(rr);
   }
 
-  // --- Overlay draw (tokens + pink boxes) -----------------------------------
+  // Draw tokens + pink rect + live drag
   function drawOverlay() {
     const overlay = overlayRef.current;
-    const canvas = baseCanvas.current;
-    if (!overlay || !canvas) return;
-
+    if (!overlay) return;
     overlay.innerHTML = "";
 
-    // Token boxes (orange)
     if (showTokenBoxes) {
       for (const t of tokens) {
         const d = document.createElement("div");
@@ -183,7 +165,6 @@ export default function PdfEditCanvas({
       }
     }
 
-    // Persisted/selected rect (pink)
     if (rect && rect.page === page) {
       const d = document.createElement("div");
       d.className = "pink";
@@ -191,7 +172,6 @@ export default function PdfEditCanvas({
       overlay.appendChild(d);
     }
 
-    // Live drag rect
     if (dragStart.current && dragNow.current) {
       const d = document.createElement("div");
       d.className = "pink live";
@@ -208,7 +188,7 @@ export default function PdfEditCanvas({
     }
   }
 
-  // OCR px -> CSS px for overlay (display only)
+  // OCR px -> overlay CSS px (display only)
   function placeCss(node: HTMLDivElement, x0: number, y0: number, x1: number, y1: number) {
     const overlay = overlayRef.current;
     if (!overlay) return;
@@ -216,25 +196,19 @@ export default function PdfEditCanvas({
     const sx = R.width / serverW;
     const sy = R.height / serverH;
 
-    const left = Math.min(x0, x1) * sx;
-    const top = Math.min(y0, y1) * sy;
-    const width = Math.abs(x1 - x0) * sx;
-    const height = Math.abs(y1 - y0) * sy;
-
-    node.style.left = `${left}px`;
-    node.style.top = `${top}px`;
-    node.style.width = `${width}px`;
-    node.style.height = `${height}px`;
+    node.style.left = `${Math.min(x0, x1) * sx}px`;
+    node.style.top = `${Math.min(y0, y1) * sy}px`;
+    node.style.width = `${Math.abs(x1 - x0) * sx}px`;
+    node.style.height = `${Math.abs(y1 - y0) * sy}px`;
   }
 
-  // Redraw when props change
   useEffect(() => {
     drawOverlay();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tokens, rect, showTokenBoxes, page, serverW, serverH]);
 
   return (
-    <div ref={wrapRef} className="pdf-stage" style={{ position: "relative", overflow: "auto" }}>
+    <div className="pdf-stage" style={{ position: "relative", overflow: "auto" }}>
       <canvas ref={baseCanvas} />
       <div
         ref={overlayRef}
@@ -245,7 +219,6 @@ export default function PdfEditCanvas({
         style={{
           position: "absolute",
           inset: 0,
-          // transparent; we never paint a solid background → no "black bar" effect
           background: "transparent",
           cursor: editable ? "crosshair" : "default",
           userSelect: "none",
