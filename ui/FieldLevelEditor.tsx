@@ -1,5 +1,5 @@
 // File: src/tsp4/components/lasso/FieldLevelEditor.tsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import "../ocr.css";
 import PdfEditCanvas, { type EditRect, type TokenBox } from "./PdfEditCanvas";
 import {
@@ -8,32 +8,26 @@ import {
   getMeta,
   getBoxes,
   docIdFromUrl,
-  ocrPreview, // optional: just to show last OCR from the lasso
+  ocrPreview,
 } from "../../../lib/api";
 
-/* ------------ Types ------------ */
 type KVRect = { page: number; x0: number; y0: number; x1: number; y1: number };
 type AnyJson = Record<string, any>;
+type FieldRow = { key: string; value: string; rects?: KVRect[] };
 
-type FieldRow = {
-  key: string;
-  value: string;
-  rects?: KVRect[]; // if JSON gives boxes; else we compute by matching
-};
-
-/* ------------ String helpers + matching ------------ */
-function norm(s: string): string {
-  return (s || "")
+/* ---------- helpers ---------- */
+const norm = (s: string) =>
+  (s || "")
     .toLowerCase()
     .normalize("NFKC")
     .replace(/[\u00A0]/g, " ")
     .replace(/[^\p{L}\p{N}\s]/gu, "")
     .replace(/\s+/g, " ")
     .trim();
-}
-function normKeepDigits(s: string): string {
-  return (s || "").toLowerCase().normalize("NFKC").replace(/[,$]/g, "").replace(/\s+/g, " ").trim();
-}
+
+const normNum = (s: string) =>
+  (s || "").toLowerCase().normalize("NFKC").replace(/[,$]/g, "").replace(/\s+/g, " ").trim();
+
 function levRatio(a: string, b: string): number {
   const m = a.length, n = b.length;
   if (!m && !n) return 1;
@@ -50,7 +44,8 @@ function levRatio(a: string, b: string): number {
   }
   return 1 - dp[n] / Math.max(1, Math.max(m, n));
 }
-function unionRect(span: TokenBox[]): { x0: number; y0: number; x1: number; y1: number } {
+
+function unionRect(span: TokenBox[]) {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (const t of span) {
     x0 = Math.min(x0, t.x0);
@@ -68,21 +63,20 @@ function linePenalty(span: TokenBox[]) {
   const avg = hs.reduce((a, b) => a + b, 0) / Math.max(1, hs.length);
   return Math.max(0, spread - avg * 0.6) / Math.max(1, avg);
 }
-/** Find best window of tokens (across all pages) that matches value. Returns page + rect union. */
-function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 8): { page: number; rect: { x0: number; y0: number; x1: number; y1: number }; score: number } | null {
-  const value = valueRaw?.trim();
+
+/** robust token matching across all pages */
+function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 12) {
+  const value = (valueRaw || "").trim();
   if (!value) return null;
 
   const looksNumeric = /^[\s\-$€£₹,.\d/]+$/.test(value);
-  const target = looksNumeric ? normKeepDigits(value) : norm(value);
+  const target = looksNumeric ? normNum(value) : norm(value);
   if (!target) return null;
 
-  // group tokens by page, order roughly by reading order
+  // group & sort tokens per page
   const byPage = new Map<number, TokenBox[]>();
   for (const t of allTokens) {
-    const arr = byPage.get(t.page) || [];
-    arr.push(t);
-    byPage.set(t.page, arr);
+    (byPage.get(t.page) || byPage.set(t.page, []).get(t.page)!).push(t);
   }
   byPage.forEach((arr) => arr.sort((a, b) => (a.y0 === b.y0 ? a.x0 - b.x0 : a.y0 - b.y0)));
 
@@ -100,11 +94,11 @@ function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 
         span.push(t);
         accum = (accum ? accum + " " : "") + txt;
 
-        const cand = looksNumeric ? normKeepDigits(accum) : norm(accum);
+        // a couple of quick accept checks
+        const cand = looksNumeric ? normNum(accum) : norm(accum);
         if (target.length >= 2 && !cand.includes(target.slice(0, 2))) continue;
-
         const sim = levRatio(cand, target);
-        if (sim < 0.6) continue;
+        if (sim < 0.62) continue;
 
         const score = sim - Math.min(0.25, linePenalty(span) * 0.12);
         if (!best || score > best.score) best = { score, page: pg, span: [...span] };
@@ -117,116 +111,92 @@ function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 
   return { page: best.page, rect, score: best.score };
 }
 
-/* -------------------------------------------
-   JSON → rows[] adapter
-   Supports common shapes that may include bboxes.
---------------------------------------------*/
+/* JSON → FieldRow[] (handles several common shapes incl. optional bboxes) */
 function parseExtractionToRows(obj: AnyJson): FieldRow[] {
   if (!obj) return [];
-  // Prefer: { fields:[{key, value, bboxes:[{page,x0,y0,x1,y1}]}] }
   if (Array.isArray(obj.fields)) {
     return obj.fields.map((f: AnyJson) => ({
       key: String(f.key ?? ""),
       value: f.value != null ? String(f.value) : "",
-      rects: normalizeBoxes(f.bboxes || f.boxes || f.bbox || f.rects),
+      rects: normalizeRects(f.bboxes || f.boxes || f.bbox || f.rects),
     }));
   }
   const rows: FieldRow[] = [];
   for (const [k, v] of Object.entries(obj)) {
     if (v == null) { rows.push({ key: k, value: "" }); continue; }
     if (typeof v === "object" && !Array.isArray(v)) {
-      const vv = v as AnyJson;
       rows.push({
         key: k,
-        value: vv.value != null ? String(vv.value) : stringy(v),
-        rects: normalizeBoxes(vv.bboxes || vv.boxes || vv.bbox || vv.rects),
+        value: v.value != null ? String(v.value) : tryStr(v),
+        rects: normalizeRects(v.bboxes || v.boxes || v.bbox || v.rects),
       });
-      continue;
+    } else {
+      rows.push({ key: k, value: Array.isArray(v) ? v.map(String).join(" ") : String(v) });
     }
-    if (Array.isArray(v)) {
-      const rects = normalizeBoxes(v);
-      if (rects?.length) { rows.push({ key: k, value: "", rects }); continue; }
-      rows.push({ key: k, value: v.map(String).join(" ") });
-      continue;
-    }
-    rows.push({ key: k, value: String(v) });
   }
   return rows;
 }
-function normalizeBoxes(input: any): KVRect[] | undefined {
-  if (!input) return undefined;
-  const arr = Array.isArray(input) ? input : [input];
+function normalizeRects(x: any): KVRect[] | undefined {
+  if (!x) return undefined;
+  const arr = Array.isArray(x) ? x : [x];
   const out: KVRect[] = [];
   for (const b of arr) {
-    if (b && Number.isFinite(Number(b.page))) {
-      out.push({ page: Number(b.page), x0: Number(b.x0), y0: Number(b.y0), x1: Number(b.x1), y1: Number(b.y1) });
+    if (b && Number.isFinite(+b.page)) {
+      out.push({ page: +b.page, x0: +b.x0, y0: +b.y0, x1: +b.x1, y1: +b.y1 });
     }
   }
   return out.length ? out : undefined;
 }
-function stringy(v: any): string {
-  try { if (typeof v === "string") return v; return JSON.stringify(v); } catch { return String(v); }
-}
+const tryStr = (v: any) => {
+  try { return typeof v === "string" ? v : JSON.stringify(v); } catch { return String(v); }
+};
 
-/* ------------ Component ------------ */
+/* ---------- component ---------- */
 export default function FieldLevelEditor() {
-  // Document/page
+  // doc + page
   const [docUrl, setDocUrl] = useState("");
   const [docId, setDocId] = useState("");
   const [meta, setMeta] = useState<{ w: number; h: number }[]>([]);
   const [page, setPage] = useState(1);
 
-  // OCR tokens (orange)
+  // tokens (orange)
   const [tokens, setTokens] = useState<TokenBox[]>([]);
-  const tokensThisPage = useMemo(() => tokens.filter((t) => t.page === page), [tokens, page]);
+  const tokensPage = useMemo(() => tokens.filter((t) => t.page === page), [tokens, page]);
 
-  // Left table (extraction JSON)
+  // left table
   const [rows, setRows] = useState<FieldRow[]>([]);
   const [focusedKey, setFocusedKey] = useState("");
 
-  // Pink highlight on PDF (single union rect, editable via lasso/move/resize)
+  // overlays
   const [rect, setRect] = useState<EditRect | null>(null);
-
-  // Last OCR preview (from lasso)
+  const [showBoxes, setShowBoxes] = useState(false); // default OFF
   const [lastCrop, setLastCrop] = useState<{ url?: string; text?: string } | null>(null);
 
-  // Upload PDF
-  async function onUploadPdf(ev: React.ChangeEvent<HTMLInputElement>) {
-    const f = ev.target.files?.[0];
-    if (!f) return;
+  async function onUploadPdf(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0]; if (!f) return;
     try {
       const res = await uploadPdf(f);
       setDocId(res.doc_id);
       setDocUrl(res.annotated_tokens_url);
       const m = await getMeta(res.doc_id);
       setMeta(m.pages.map((p) => ({ w: p.width, h: p.height })));
-      const b = await getBoxes(res.doc_id);
-      setTokens((b as any) || []);
+      setTokens((await getBoxes(res.doc_id)) as any);
       setPage(1);
       setRect(null);
-    } finally {
-      (ev.target as HTMLInputElement).value = "";
-    }
+    } finally { (e.target as HTMLInputElement).value = ""; }
   }
 
-  // Upload extraction JSON
-  async function onUploadJson(ev: React.ChangeEvent<HTMLInputElement>) {
-    const f = ev.target.files?.[0];
-    if (!f) return;
+  async function onUploadJson(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0]; if (!f) return;
     try {
-      const text = await f.text();
-      const parsed = JSON.parse(text) as AnyJson;
+      const parsed = JSON.parse(await f.text()) as AnyJson;
       setRows(parseExtractionToRows(parsed));
       setFocusedKey("");
       setRect(null);
-    } catch {
-      alert("Invalid JSON file");
-    } finally {
-      (ev.target as HTMLInputElement).value = "";
-    }
+    } catch { alert("Invalid JSON"); }
+    finally { (e.target as HTMLInputElement).value = ""; }
   }
 
-  // Paste URL → load meta + tokens
   useEffect(() => {
     const id = docIdFromUrl(docUrl);
     if (!id) return;
@@ -234,36 +204,33 @@ export default function FieldLevelEditor() {
       setDocId(id);
       const m = await getMeta(id);
       setMeta(m.pages.map((p) => ({ w: p.width, h: p.height })));
-      const b = await getBoxes(id);
-      setTokens((b as any) || []);
+      setTokens((await getBoxes(id)) as any);
       setPage(1);
       setRect(null);
     })();
   }, [docUrl]);
 
-  // Click a row → link to boxes: prefer JSON boxes; else auto-locate via tokens
+  // left click → pink highlight (prefer JSON rects; else token match)
   function onRowClick(r: FieldRow) {
     setFocusedKey(r.key);
     const rects = r.rects || [];
     if (rects.length) {
-      // Merge same-page rects; jump to first page
-      const firstPg = rects[0].page;
-      const same = rects.filter((rr) => rr.page === firstPg);
-      const union = same.reduce(
-        (acc, rr) => ({
-          page: acc.page,
-          x0: Math.min(acc.x0, rr.x0),
-          y0: Math.min(acc.y0, rr.y0),
-          x1: Math.max(acc.x1, rr.x1),
-          y1: Math.max(acc.y1, rr.y1),
-        }),
-        { page: firstPg, x0: rects[0].x0, y0: rects[0].y0, x1: rects[0].x1, y1: rects[0].y1 }
-      );
-      setPage(firstPg);
-      setRect(union);
+      // choose page with most coverage, then union same-page rects
+      const byPg: Record<number, KVRect[]> = {};
+      rects.forEach(b => (byPg[b.page] = byPg[b.page] ? [...byPg[b.page], b] : [b]));
+      const pg = Number(Object.keys(byPg).sort((a, b) => byPg[+b].length - byPg[+a].length)[0]);
+      const same = byPg[pg];
+      const uni = same.reduce((acc, rr) => ({
+        page: pg,
+        x0: Math.min(acc.x0, rr.x0),
+        y0: Math.min(acc.y0, rr.y0),
+        x1: Math.max(acc.x1, rr.x1),
+        y1: Math.max(acc.y1, rr.y1),
+      }), { page: pg, x0: same[0].x0, y0: same[0].y0, x1: same[0].x1, y1: same[0].y1 });
+      setPage(pg);
+      setRect(uni);
       return;
     }
-    // No rects in JSON → try matching tokens
     const hit = autoLocateByValue(r.value, tokens);
     if (hit) {
       setPage(hit.page);
@@ -273,28 +240,15 @@ export default function FieldLevelEditor() {
     }
   }
 
-  // Lasso commit → update link locally + optional OCR preview
   async function onRectCommitted(rr: EditRect) {
     if (!focusedKey) return;
-    // Update the row's rects to this single rect
-    setRows((prev) =>
-      prev.map((row) =>
-        row.key === focusedKey
-          ? { ...row, rects: [{ page: rr.page, x0: rr.x0, y0: rr.y0, x1: rr.x1, y1: rr.y1 }] }
-          : row
-      )
-    );
-    setRect(rr);
-
-    // Optional OCR preview (non-destructive; does not overwrite JSON value)
+    setRect(rr); // keep it
     try {
       if (docId) {
         const res = await ocrPreview(docId, rr.page, rr);
         setLastCrop({ url: res?.crop_url, text: (res?.text || "").trim() });
       }
-    } catch {
-      /* ignore preview errors */
-    }
+    } catch { /* preview best-effort */ }
   }
 
   const serverW = meta[page - 1]?.w || 1;
@@ -312,12 +266,15 @@ export default function FieldLevelEditor() {
           onChange={(e) => setDocUrl(e.target.value || "")}
           style={{ marginLeft: 8 }}
         />
+        <label className={showBoxes ? "btn toggle active" : "btn toggle"} style={{ marginLeft: 8 }}>
+          <input type="checkbox" checked={showBoxes} onChange={() => setShowBoxes(v => !v)} /> Boxes
+        </label>
         <span className="spacer" />
         <span className="muted">API: {API}</span>
       </div>
 
       <div className="wb-split" style={{ display: "flex", gap: 12 }}>
-        {/* LEFT: 30% — extraction fields */}
+        {/* LEFT 30% */}
         <div className="wb-left" style={{ flexBasis: "30%", flexGrow: 0, flexShrink: 0, overflow: "auto" }}>
           <div className="section-title">Extraction</div>
           {!rows.length ? (
@@ -325,20 +282,15 @@ export default function FieldLevelEditor() {
           ) : (
             <table>
               <thead>
-                <tr>
-                  <th style={{ width: "38%" }}>Key</th>
-                  <th>Value</th>
-                </tr>
+                <tr><th style={{ width: "40%" }}>Key</th><th>Value</th></tr>
               </thead>
               <tbody>
-                {rows.map((r, idx) => {
+                {rows.map((r, i) => {
                   const focused = r.key === focusedKey;
                   return (
-                    <tr
-                      key={r.key + ":" + idx}
-                      onClick={() => onRowClick(r)}
-                      style={focused ? { outline: "2px solid #ec4899", outlineOffset: -2 } : undefined}
-                    >
+                    <tr key={r.key + ":" + i}
+                        onClick={() => onRowClick(r)}
+                        style={focused ? { outline: "2px solid #ec4899", outlineOffset: -2 } : undefined}>
                       <td><code>{r.key}</code></td>
                       <td style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.value}</td>
                     </tr>
@@ -359,27 +311,24 @@ export default function FieldLevelEditor() {
           )}
         </div>
 
-        {/* RIGHT: 70% — PDF (stable size) */}
+        {/* RIGHT 70% */}
         <div className="wb-right" style={{ flexBasis: "70%", overflow: "auto" }}>
           {docUrl ? (
             <>
               <div className="toolbar-inline">
-                <button disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>Prev</button>
-                <span className="page-indicator">
-                  Page {page} {meta.length ? `/ ${meta.length}` : ""}
-                </span>
-                <button disabled={meta.length > 0 && page >= meta.length} onClick={() => setPage((p) => p + 1)}>Next</button>
+                <button disabled={page <= 1} onClick={() => setPage(p => p - 1)}>Prev</button>
+                <span className="page-indicator">Page {page} {meta.length ? `/ ${meta.length}` : ""}</span>
+                <button disabled={meta.length > 0 && page >= meta.length} onClick={() => setPage(p => p + 1)}>Next</button>
               </div>
-
               <PdfEditCanvas
                 docUrl={docUrl}
                 page={page}
                 serverW={serverW}
                 serverH={serverH}
-                tokens={tokensThisPage}
+                tokens={tokensPage}
                 rect={rect}
-                showTokenBoxes={true}
-                editable={true}              // lasso + move/resize enabled
+                showTokenBoxes={showBoxes}
+                editable={true}
                 onRectChange={setRect}
                 onRectCommit={onRectCommitted}
               />
