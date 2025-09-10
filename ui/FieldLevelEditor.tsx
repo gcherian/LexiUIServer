@@ -11,20 +11,30 @@ import {
   ocrPreview,
 } from "../../../lib/api";
 
+/* ---------------- Types ---------------- */
 type KVRect = { page: number; x0: number; y0: number; x1: number; y1: number };
 type AnyJson = Record<string, any>;
 type FieldRow = { key: string; value: string; rects?: KVRect[] };
 
-/* ---------- helpers ---------- */
+/* ---------------- String + scoring helpers ---------------- */
+const ABBREV: Record<string, string> = {
+  rd: "road", "rd.": "road",
+  ave: "avenue", "ave.": "avenue", av: "avenue",
+  st: "street", "st.": "street",
+  blvd: "boulevard", "blvd.": "boulevard",
+  dr: "drive", "dr.": "drive",
+  ln: "lane", "ln.": "lane",
+  hwy: "highway", "hwy.": "highway",
+  ct: "court", "ct.": "court",
+};
 const norm = (s: string) =>
   (s || "")
     .toLowerCase()
     .normalize("NFKC")
     .replace(/[\u00A0]/g, " ")
-    .replace(/[^\p{L}\p{N}\s]/gu, "")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
-
 const normNum = (s: string) =>
   (s || "").toLowerCase().normalize("NFKC").replace(/[,$]/g, "").replace(/\s+/g, " ").trim();
 
@@ -64,44 +74,75 @@ function linePenalty(span: TokenBox[]) {
   return Math.max(0, spread - avg * 0.6) / Math.max(1, avg);
 }
 
-/** robust token matching across all pages */
-function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 12) {
-  const value = (valueRaw || "").trim();
-  if (!value) return null;
+/** Better locator: word-based, street-abbrev tolerant, unions best span */
+function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 16) {
+  const raw = (valueRaw || "").trim();
+  if (!raw) return null;
 
-  const looksNumeric = /^[\s\-$€£₹,.\d/]+$/.test(value);
-  const target = looksNumeric ? normNum(value) : norm(value);
-  if (!target) return null;
+  const looksNumeric = /^[\s\-$€£₹,.\d/]+$/.test(raw);
+  const words = looksNumeric
+    ? [normNum(raw)]
+    : norm(raw).split(" ").map((w) => ABBREV[w] ?? w);
 
   // group & sort tokens per page
   const byPage = new Map<number, TokenBox[]>();
   for (const t of allTokens) {
     (byPage.get(t.page) || byPage.set(t.page, []).get(t.page)!).push(t);
   }
-  byPage.forEach((arr) => arr.sort((a, b) => (a.y0 === b.y0 ? a.x0 - b.x0 : a.y0 - b.y0)));
+  byPage.forEach((arr) =>
+    arr.sort((a, b) => (a.y0 === b.y0 ? a.x0 - b.x0 : a.y0 - b.y0))
+  );
 
   let best: { score: number; page: number; span: TokenBox[] } | null = null;
+
+  function scoreSpan(span: TokenBox[]) {
+    const txt = span
+      .map((t) => (t.text || ""))
+      .join(" ")
+      .toLowerCase()
+      .normalize("NFKC")
+      .replace(/[^\p{L}\p{N}\s]/gu, " ");
+    const spanWords = txt.split(/\s+/).filter(Boolean).map((w) => ABBREV[w] ?? w);
+
+    if (looksNumeric) {
+      const fuzz = levRatio(spanWords.join(" "), words.join(" "));
+      return fuzz - Math.min(0.25, linePenalty(span) * 0.12);
+    }
+
+    let covered = 0;
+    let j = 0;
+    for (let i = 0; i < words.length && j < spanWords.length; ) {
+      if (words[i] === spanWords[j] || levRatio(words[i], spanWords[j]) >= 0.8) {
+        covered++;
+        i++;
+        j++;
+      } else {
+        j++;
+      }
+    }
+    const coverage = covered / Math.max(1, words.length);
+    const fuzz = levRatio(spanWords.join(" "), words.join(" "));
+    return coverage * 0.75 + fuzz * 0.35 - Math.min(0.25, linePenalty(span) * 0.12);
+  }
 
   byPage.forEach((toks, pg) => {
     const n = toks.length;
     for (let i = 0; i < n; i++) {
-      let accum = "";
       const span: TokenBox[] = [];
       for (let w = 0; w < maxWindow && i + w < n; w++) {
         const t = toks[i + w];
-        const txt = (t.text || "").trim();
-        if (!txt) continue;
+        const token = (t.text || "").trim();
+        if (!token) continue;
         span.push(t);
-        accum = (accum ? accum + " " : "") + txt;
 
-        // a couple of quick accept checks
-        const cand = looksNumeric ? normNum(accum) : norm(accum);
-        if (target.length >= 2 && !cand.includes(target.slice(0, 2))) continue;
-        const sim = levRatio(cand, target);
-        if (sim < 0.62) continue;
+        if (span.length === 1 && !looksNumeric) {
+          const first = words[0];
+          const tokenN = token.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, "");
+          if (levRatio(first, tokenN) < 0.6) continue;
+        }
 
-        const score = sim - Math.min(0.25, linePenalty(span) * 0.12);
-        if (!best || score > best.score) best = { score, page: pg, span: [...span] };
+        const s = scoreSpan(span);
+        if (!best || s > best.score) best = { score: s, page: pg, span: [...span] };
       }
     }
   });
@@ -111,30 +152,55 @@ function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 
   return { page: best.page, rect, score: best.score };
 }
 
-/* JSON → FieldRow[] (handles several common shapes incl. optional bboxes) */
-function parseExtractionToRows(obj: AnyJson): FieldRow[] {
-  if (!obj) return [];
-  if (Array.isArray(obj.fields)) {
-    return obj.fields.map((f: AnyJson) => ({
-      key: String(f.key ?? ""),
-      value: f.value != null ? String(f.value) : "",
-      rects: normalizeRects(f.bboxes || f.boxes || f.bbox || f.rects),
-    }));
+/* ---------------- Flatten nested JSON to dotted keys ---------------- */
+type FlatKV = { key: string; value: string; rects?: KVRect[] };
+function flattenJson(obj: any, prefix = ""): FlatKV[] {
+  const rows: FlatKV[] = [];
+  const push = (k: string, v: any) =>
+    rows.push({ key: k, value: v == null ? "" : String(v) });
+
+  if (obj === null || obj === undefined) return [{ key: prefix || "(null)", value: "" }];
+
+  if (Array.isArray(obj)) {
+    obj.forEach((v, i) => {
+      const path = prefix ? `${prefix}[${i}]` : `[${i}]`;
+      if (typeof v === "object" && v !== null) rows.push(...flattenJson(v, path));
+      else push(path, v);
+    });
+    return rows;
   }
-  const rows: FieldRow[] = [];
-  for (const [k, v] of Object.entries(obj)) {
-    if (v == null) { rows.push({ key: k, value: "" }); continue; }
-    if (typeof v === "object" && !Array.isArray(v)) {
-      rows.push({
-        key: k,
-        value: v.value != null ? String(v.value) : tryStr(v),
-        rects: normalizeRects(v.bboxes || v.boxes || v.bbox || v.rects),
-      });
+
+  if (typeof obj !== "object") return [{ key: prefix || "(value)", value: String(obj) }];
+
+  for (const k of Object.keys(obj)) {
+    const path = prefix ? `${prefix}.${k}` : k;
+    const v = obj[k];
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      // try to extract rect info patterns
+      const rects = normalizeRects(v.bboxes || v.boxes || v.bbox || v.rects);
+      if ("value" in v || rects) {
+        rows.push({
+          key: path,
+          value: "value" in v ? String(v.value ?? "") : tryStr(v),
+          rects,
+        });
+      } else {
+        rows.push(...flattenJson(v, path));
+      }
+    } else if (Array.isArray(v)) {
+      rows.push(...flattenJson(v, path));
     } else {
-      rows.push({ key: k, value: Array.isArray(v) ? v.map(String).join(" ") : String(v) });
+      push(path, v);
     }
   }
   return rows;
+}
+function tryStr(v: any) {
+  try {
+    return typeof v === "string" ? v : JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
 }
 function normalizeRects(x: any): KVRect[] | undefined {
   if (!x) return undefined;
@@ -142,16 +208,31 @@ function normalizeRects(x: any): KVRect[] | undefined {
   const out: KVRect[] = [];
   for (const b of arr) {
     if (b && Number.isFinite(+b.page)) {
-      out.push({ page: +b.page, x0: +b.x0, y0: +b.y0, x1: +b.x1, y1: +b.y1 });
+      // support either x0/x1/y0/y1 or x/y/w/h
+      const hasXYWH = b.x != null && b.y != null && b.w != null && b.h != null;
+      if (hasXYWH) {
+        out.push({
+          page: +b.page,
+          x0: +b.x,
+          y0: +b.y,
+          x1: +b.x + +b.w,
+          y1: +b.y + +b.h,
+        });
+      } else {
+        out.push({
+          page: +b.page,
+          x0: +b.x0,
+          y0: +b.y0,
+          x1: +b.x1,
+          y1: +b.y1,
+        });
+      }
     }
   }
   return out.length ? out : undefined;
 }
-const tryStr = (v: any) => {
-  try { return typeof v === "string" ? v : JSON.stringify(v); } catch { return String(v); }
-};
 
-/* ---------- component ---------- */
+/* ---------------- Component ---------------- */
 export default function FieldLevelEditor() {
   // doc + page
   const [docUrl, setDocUrl] = useState("");
@@ -163,7 +244,7 @@ export default function FieldLevelEditor() {
   const [tokens, setTokens] = useState<TokenBox[]>([]);
   const tokensPage = useMemo(() => tokens.filter((t) => t.page === page), [tokens, page]);
 
-  // left table
+  // left table (extraction)
   const [rows, setRows] = useState<FieldRow[]>([]);
   const [focusedKey, setFocusedKey] = useState("");
 
@@ -172,8 +253,12 @@ export default function FieldLevelEditor() {
   const [showBoxes, setShowBoxes] = useState(false); // default OFF
   const [lastCrop, setLastCrop] = useState<{ url?: string; text?: string } | null>(null);
 
+  // optional zoom
+  const [zoom, setZoom] = useState(1);
+
   async function onUploadPdf(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0]; if (!f) return;
+    const f = e.target.files?.[0];
+    if (!f) return;
     try {
       const res = await uploadPdf(f);
       setDocId(res.doc_id);
@@ -183,20 +268,35 @@ export default function FieldLevelEditor() {
       setTokens((await getBoxes(res.doc_id)) as any);
       setPage(1);
       setRect(null);
-    } finally { (e.target as HTMLInputElement).value = ""; }
+    } finally {
+      (e.target as HTMLInputElement).value = "";
+    }
   }
 
-  async function onUploadJson(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0]; if (!f) return;
+  async function onUploadEcm(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    if (!f) return;
     try {
       const parsed = JSON.parse(await f.text()) as AnyJson;
-      setRows(parseExtractionToRows(parsed));
+      // Flatten to dotted keys, but keep any field-local rects if present
+      const flat = flattenJson(parsed);
+      // Convert FlatKV -> FieldRow (preserve rects when available)
+      const fr: FieldRow[] = flat.map((kv) => ({
+        key: kv.key,
+        value: kv.value,
+        rects: kv.rects, // may be undefined
+      }));
+      setRows(fr);
       setFocusedKey("");
       setRect(null);
-    } catch { alert("Invalid JSON"); }
-    finally { (e.target as HTMLInputElement).value = ""; }
+    } catch {
+      alert("Invalid ECM JSON");
+    } finally {
+      (e.target as HTMLInputElement).value = "";
+    }
   }
 
+  // Paste /data/{doc}/original.pdf
   useEffect(() => {
     const id = docIdFromUrl(docUrl);
     if (!id) return;
@@ -217,16 +317,19 @@ export default function FieldLevelEditor() {
     if (rects.length) {
       // choose page with most coverage, then union same-page rects
       const byPg: Record<number, KVRect[]> = {};
-      rects.forEach(b => (byPg[b.page] = byPg[b.page] ? [...byPg[b.page], b] : [b]));
+      rects.forEach((b) => (byPg[b.page] = byPg[b.page] ? [...byPg[b.page], b] : [b]));
       const pg = Number(Object.keys(byPg).sort((a, b) => byPg[+b].length - byPg[+a].length)[0]);
       const same = byPg[pg];
-      const uni = same.reduce((acc, rr) => ({
-        page: pg,
-        x0: Math.min(acc.x0, rr.x0),
-        y0: Math.min(acc.y0, rr.y0),
-        x1: Math.max(acc.x1, rr.x1),
-        y1: Math.max(acc.y1, rr.y1),
-      }), { page: pg, x0: same[0].x0, y0: same[0].y0, x1: same[0].x1, y1: same[0].y1 });
+      const uni = same.reduce(
+        (acc, rr) => ({
+          page: pg,
+          x0: Math.min(acc.x0, rr.x0),
+          y0: Math.min(acc.y0, rr.y0),
+          x1: Math.max(acc.x1, rr.x1),
+          y1: Math.max(acc.y1, rr.y1),
+        }),
+        { page: pg, x0: same[0].x0, y0: same[0].y0, x1: same[0].x1, y1: same[0].y1 }
+      );
       setPage(pg);
       setRect(uni);
       return;
@@ -240,15 +343,24 @@ export default function FieldLevelEditor() {
     }
   }
 
+  // Lasso/move/resize commit → OCR preview (and parent can persist if needed)
   async function onRectCommitted(rr: EditRect) {
     if (!focusedKey) return;
-    setRect(rr); // keep it
     try {
       if (docId) {
         const res = await ocrPreview(docId, rr.page, rr);
         setLastCrop({ url: res?.crop_url, text: (res?.text || "").trim() });
+
+        // also overwrite the value in our left table for the focused key
+        setRows((prev) =>
+          prev.map((row) =>
+            row.key === focusedKey ? { ...row, value: (res?.text || "").trim(), rects: [{ page: rr.page, ...rr }] } : row
+          )
+        );
       }
-    } catch { /* preview best-effort */ }
+    } catch {
+      /* preview best-effort */
+    }
   }
 
   const serverW = meta[page - 1]?.w || 1;
@@ -256,43 +368,68 @@ export default function FieldLevelEditor() {
 
   return (
     <div className="workbench">
-      <div className="wb-toolbar">
-        <input type="file" accept="application/pdf" onChange={onUploadPdf} />
-        <input type="file" accept="application/json" onChange={onUploadJson} style={{ marginLeft: 8 }} />
+      <div className="wb-toolbar" style={{ gap: 8 }}>
+        <span style={{ fontWeight: 600 }}>Choose:</span>
+        {/* PDF uploader */}
+        <label className="btn">
+          <input type="file" accept="application/pdf" onChange={onUploadPdf} style={{ display: "none" }} />
+          PDF
+        </label>
+        {/* ECM uploader */}
+        <label className="btn">
+          <input type="file" accept="application/json" onChange={onUploadEcm} style={{ display: "none" }} />
+          ECM JSON
+        </label>
+
         <input
           className="input"
-          placeholder="Paste /data/{doc_id}/original.pdf"
+          placeholder="...or paste /data/{doc_id}/original.pdf"
           value={docUrl}
           onChange={(e) => setDocUrl(e.target.value || "")}
-          style={{ marginLeft: 8 }}
+          style={{ marginLeft: 8, minWidth: 360 }}
         />
+
         <label className={showBoxes ? "btn toggle active" : "btn toggle"} style={{ marginLeft: 8 }}>
-          <input type="checkbox" checked={showBoxes} onChange={() => setShowBoxes(v => !v)} /> Boxes
+          <input type="checkbox" checked={showBoxes} onChange={() => setShowBoxes((v) => !v)} /> Boxes
         </label>
+
         <span className="spacer" />
-        <span className="muted">API: {API}</span>
+
+        {/* Simple zoom cluster */}
+        <div className="toolbar-inline" style={{ gap: 4 }}>
+          <button onClick={() => setZoom((z) => Math.max(0.5, Math.round((z - 0.1) * 10) / 10))}>–</button>
+          <span style={{ width: 44, textAlign: "center" }}>{Math.round(zoom * 100)}%</span>
+          <button onClick={() => setZoom((z) => Math.min(3, Math.round((z + 0.1) * 10) / 10))}>+</button>
+          <button onClick={() => setZoom(1)}>Reset</button>
+        </div>
+
+        <span className="muted" style={{ marginLeft: 12 }}>API: {API}</span>
       </div>
 
       <div className="wb-split" style={{ display: "flex", gap: 12 }}>
-        {/* LEFT 30% */}
+        {/* LEFT 30% — KV table */}
         <div className="wb-left" style={{ flexBasis: "30%", flexGrow: 0, flexShrink: 0, overflow: "auto" }}>
           <div className="section-title">Extraction</div>
           {!rows.length ? (
-            <div className="placeholder">Upload extraction JSON to see fields.</div>
+            <div className="placeholder">Upload ECM JSON to see fields.</div>
           ) : (
             <table>
               <thead>
-                <tr><th style={{ width: "40%" }}>Key</th><th>Value</th></tr>
+                <tr><th style={{ width: "42%" }}>Key</th><th>Value</th></tr>
               </thead>
               <tbody>
                 {rows.map((r, i) => {
                   const focused = r.key === focusedKey;
                   return (
-                    <tr key={r.key + ":" + i}
-                        onClick={() => onRowClick(r)}
-                        style={focused ? { outline: "2px solid #ec4899", outlineOffset: -2 } : undefined}>
+                    <tr
+                      key={r.key + ":" + i}
+                      onClick={() => onRowClick(r)}
+                      style={focused ? { outline: "2px solid #ec4899", outlineOffset: -2 } : undefined}
+                    >
                       <td><code>{r.key}</code></td>
-                      <td style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.value}</td>
+                      <td style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {r.value}
+                      </td>
                     </tr>
                   );
                 })}
@@ -311,14 +448,14 @@ export default function FieldLevelEditor() {
           )}
         </div>
 
-        {/* RIGHT 70% */}
+        {/* RIGHT 70% — PDF */}
         <div className="wb-right" style={{ flexBasis: "70%", overflow: "auto" }}>
           {docUrl ? (
             <>
               <div className="toolbar-inline">
-                <button disabled={page <= 1} onClick={() => setPage(p => p - 1)}>Prev</button>
+                <button disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>Prev</button>
                 <span className="page-indicator">Page {page} {meta.length ? `/ ${meta.length}` : ""}</span>
-                <button disabled={meta.length > 0 && page >= meta.length} onClick={() => setPage(p => p + 1)}>Next</button>
+                <button disabled={meta.length > 0 && page >= meta.length} onClick={() => setPage((p) => p + 1)}>Next</button>
               </div>
               <PdfEditCanvas
                 docUrl={docUrl}
@@ -331,6 +468,7 @@ export default function FieldLevelEditor() {
                 editable={true}
                 onRectChange={setRect}
                 onRectCommit={onRectCommitted}
+                zoom={zoom}
               />
             </>
           ) : (
