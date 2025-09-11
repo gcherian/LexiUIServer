@@ -622,39 +622,39 @@ button:disabled {
 }
 
 /* Keep the PDF stage scrollable as needed */
-.pdf-stage {
-  overflow: auto;
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  margin: 8px 8px 0 8px;
-  padding: 8px;
-  border-radius: 4px;
+
+
+/* neutral, white theme */
+.workbench, .pdf-stage { background: #fff; color: #111; }
+.wb-toolbar { background: #fff; border-bottom: 1px solid #eee; }
+.btn, .btn.toggle { background: #fff; border: 1px solid #ddd; }
+.btn.toggle.active { background: #f8f8f8; }
+
+/* tokens and pink */
+.overlay .tok {
+  border: 1px solid rgba(255, 165, 0, 0.55);
+  background: rgba(255, 165, 0, 0.10);
+}
+.overlay .pink {
+  border: 2px solid #ec4899;
+  background: rgba(236,72,153,0.14);
+  box-shadow: 0 0 0 1px rgba(236,72,153,0.2) inset;
 }
 
+/* flash when a value updates from OCR */
+.flash {
+  animation: flashfill 900ms ease-out;
+}
+@keyframes flashfill {
+  0%   { background: #e6ffed; }
+  100% { background: transparent; }
+}
 
-
-.overlay .tok { position:absolute; border:1px solid rgba(255,165,0,.8); background:rgba(255,165,0,.15); }
-.overlay .pink { position:absolute; border:2px solid #ec4899; background:rgba(236,72,153,.12); }
 .overlay .pink.live { border-style: dashed; }
 
-/* token (orange) boxes */
-.overlay .tok {
-  position: absolute;
-  border: 1px solid rgba(255, 136, 0, 0.9);
-  background: rgba(255, 136, 0, 0.08);
-  pointer-events: none;
-}
 
-/* pink selection */
-.overlay .pink {
-  position: absolute;
-  border: 2px solid rgba(236, 72, 153, 0.95);
-  background: rgba(236, 72, 153, 0.15);
-  box-shadow: 0 0 0 1px rgba(236, 72, 153, 0.35) inset;
-}
-.overlay .pink.live {
-  border-style: dashed;
-}
+
+
 
 /* resize handles on the pink box */
 .overlay .pink .handle {
