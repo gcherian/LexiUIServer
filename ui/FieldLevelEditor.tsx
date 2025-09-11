@@ -248,13 +248,14 @@ export default function FieldLevelEditor() {
   const [rows, setRows] = useState<FieldRow[]>([]);
   const [focusedKey, setFocusedKey] = useState("");
 
-  // overlays
+  // overlays + zoom
   const [rect, setRect] = useState<EditRect | null>(null);
   const [showBoxes, setShowBoxes] = useState(false); // default OFF
   const [lastCrop, setLastCrop] = useState<{ url?: string; text?: string } | null>(null);
-
-  // optional zoom
   const [zoom, setZoom] = useState(1);
+
+  // flash cue on OCR update
+  const [flashKey, setFlashKey] = useState<string>("");
 
   async function onUploadPdf(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
@@ -278,9 +279,7 @@ export default function FieldLevelEditor() {
     if (!f) return;
     try {
       const parsed = JSON.parse(await f.text()) as AnyJson;
-      // Flatten to dotted keys, but keep any field-local rects if present
       const flat = flattenJson(parsed);
-      // Convert FlatKV -> FieldRow (preserve rects when available)
       const fr: FieldRow[] = flat.map((kv) => ({
         key: kv.key,
         value: kv.value,
@@ -310,12 +309,32 @@ export default function FieldLevelEditor() {
     })();
   }, [docUrl]);
 
-  // left click → pink highlight (prefer JSON rects; else token match)
+  function centerOnRect(rr: EditRect) {
+    const stage = document.querySelector(".pdf-stage") as HTMLElement | null;
+    const overlay = document.querySelector(".pdf-stage .overlay") as HTMLElement | null;
+    if (!stage || !overlay) return;
+
+    const R = overlay.getBoundingClientRect();
+    const sx = R.width / (meta[rr.page - 1]?.w || 1);
+    const sy = R.height / (meta[rr.page - 1]?.h || 1);
+
+    const cx = ((Math.min(rr.x0, rr.x1) + Math.max(rr.x0, rr.x1)) / 2) * sx;
+    const cy = ((Math.min(rr.y0, rr.y1) + Math.max(rr.y0, rr.y1)) / 2) * sy;
+
+    stage.scrollTo({
+      left: Math.max(0, cx - stage.clientWidth / 2),
+      top: Math.max(0, cy - stage.clientHeight / 2),
+      behavior: "smooth",
+    });
+  }
+
+  // left click → pink highlight (prefer JSON rects; else token match; else best single token)
   function onRowClick(r: FieldRow) {
     setFocusedKey(r.key);
+
+    // prefer rects from JSON, union same-page
     const rects = r.rects || [];
     if (rects.length) {
-      // choose page with most coverage, then union same-page rects
       const byPg: Record<number, KVRect[]> = {};
       rects.forEach((b) => (byPg[b.page] = byPg[b.page] ? [...byPg[b.page], b] : [b]));
       const pg = Number(Object.keys(byPg).sort((a, b) => byPg[+b].length - byPg[+a].length)[0]);
@@ -331,35 +350,62 @@ export default function FieldLevelEditor() {
         { page: pg, x0: same[0].x0, y0: same[0].y0, x1: same[0].x1, y1: same[0].y1 }
       );
       setPage(pg);
-      setRect(uni);
+      const rr = { page: pg, x0: uni.x0, y0: uni.y0, x1: uni.x1, y1: uni.y1 };
+      setRect(rr);
+      requestAnimationFrame(() => centerOnRect(rr));
       return;
     }
+
+    // token auto-locate
     const hit = autoLocateByValue(r.value, tokens);
     if (hit) {
       setPage(hit.page);
-      setRect({ page: hit.page, ...hit.rect });
+      const rr = { page: hit.page, ...hit.rect };
+      setRect(rr);
+      requestAnimationFrame(() => centerOnRect(rr));
+      return;
+    }
+
+    // hard fallback: best single token
+    let best: TokenBox | null = null;
+    let bestScore = 0;
+    for (const t of tokens) {
+      const s = levRatio(norm(t.text || ""), norm(r.value || ""));
+      if (s > bestScore) {
+        bestScore = s;
+        best = t;
+      }
+    }
+    if (best) {
+      setPage(best.page);
+      const rr = { page: best.page, x0: best.x0, y0: best.y0, x1: best.x1, y1: best.y1 };
+      setRect(rr);
+      requestAnimationFrame(() => centerOnRect(rr));
     } else {
       setRect(null);
     }
   }
 
-  // Lasso/move/resize commit → OCR preview (and parent can persist if needed)
+  // Lasso/move/resize commit → OCR preview and update KV value
   async function onRectCommitted(rr: EditRect) {
     if (!focusedKey) return;
     try {
       if (docId) {
         const res = await ocrPreview(docId, rr.page, rr);
-        setLastCrop({ url: res?.crop_url, text: (res?.text || "").trim() });
+        const val = (res?.text || "").trim();
+        setLastCrop({ url: res?.crop_url, text: val });
 
-        // also overwrite the value in our left table for the focused key
         setRows((prev) =>
           prev.map((row) =>
-            row.key === focusedKey ? { ...row, value: (res?.text || "").trim(), rects: [{ page: rr.page, ...rr }] } : row
+            row.key === focusedKey ? { ...row, value: val, rects: [{ page: rr.page, ...rr }] } : row
           )
         );
+
+        setFlashKey(focusedKey);
+        setTimeout(() => setFlashKey(""), 900);
       }
     } catch {
-      /* preview best-effort */
+      /* preview is best effort */
     }
   }
 
@@ -370,15 +416,17 @@ export default function FieldLevelEditor() {
     <div className="workbench">
       <div className="wb-toolbar" style={{ gap: 8 }}>
         <span style={{ fontWeight: 600 }}>Choose:</span>
-        {/* PDF uploader */}
+
+        {/* Choose PDF */}
         <label className="btn">
           <input type="file" accept="application/pdf" onChange={onUploadPdf} style={{ display: "none" }} />
-          PDF
+          Choose PDF
         </label>
-        {/* ECM uploader */}
+
+        {/* Choose JSON */}
         <label className="btn">
           <input type="file" accept="application/json" onChange={onUploadEcm} style={{ display: "none" }} />
-          ECM JSON
+          Choose JSON
         </label>
 
         <input
@@ -395,7 +443,7 @@ export default function FieldLevelEditor() {
 
         <span className="spacer" />
 
-        {/* Simple zoom cluster */}
+        {/* Zoom */}
         <div className="toolbar-inline" style={{ gap: 4 }}>
           <button onClick={() => setZoom((z) => Math.max(0.5, Math.round((z - 0.1) * 10) / 10))}>–</button>
           <span style={{ width: 44, textAlign: "center" }}>{Math.round(zoom * 100)}%</span>
@@ -427,7 +475,10 @@ export default function FieldLevelEditor() {
                       style={focused ? { outline: "2px solid #ec4899", outlineOffset: -2 } : undefined}
                     >
                       <td><code>{r.key}</code></td>
-                      <td style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      <td
+                        className={r.key === flashKey ? "flash" : undefined}
+                        style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+                      >
                         {r.value}
                       </td>
                     </tr>
@@ -476,6 +527,15 @@ export default function FieldLevelEditor() {
           )}
         </div>
       </div>
+
+      {/* Inline tiny CSS for "flash" cue (white theme friendly) */}
+      <style>{`
+        .flash { animation: flashfill 900ms ease-out; }
+        @keyframes flashfill {
+          0%   { background: #e6ffed; }
+          100% { background: transparent; }
+        }
+      `}</style>
     </div>
   );
 }
