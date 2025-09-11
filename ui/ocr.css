@@ -1,23 +1,9 @@
-mi/* ==========================================================================
+/* ==========================================================================
    EDIP OCR / Lasso Workbench Styles
    File: src/components/ocr.css
-   ==========================================================================
-   Sections
-   1) CSS Reset & Base
-   2) App Layout
-   3) Toolbar
-   4) Panels (Left/Right)
-   5) PDF Stage + Overlays (boxes + lasso)
-   6) Forms & Inputs
-   7) Tables
-   8) Buttons, Badges, Chips
-   9) Helpers & Utilities
-   10) Responsive
    ========================================================================== */
 
-
-/* 1) CSS Reset & Base ----------------------------------------------------- */
-
+/* ---- Reset & Base ------------------------------------------------------ */
 *,
 *::before,
 *::after { box-sizing: border-box; }
@@ -28,647 +14,174 @@ html, body, #root {
   padding: 0;
 }
 
-body {
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  color: #111827;            /* gray-900 */
-  background: #f8fafc;       /* slate-50 */
-  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
-        Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+:root{
+  --border: #e5e7eb;     /* gray-200 */
+  --muted: #6b7280;      /* gray-500 */
+  --panel: #ffffff;      /* white */
+  --primary: #2563eb;    /* blue-600 */
+  --primary-700:#1d4ed8; /* blue-700 */
+  --accent: #6366f1;     /* indigo-500 */
 }
 
-:root {
-  --border: #e5e7eb;         /* gray-200 */
-  --muted: #6b7280;          /* gray-500 */
-  --muted-2: #9ca3af;        /* gray-400 */
-  --panel: #ffffff;          /* white */
-  --panel-soft: #fafafa;     /* near white */
-  --primary: #2563eb;        /* blue-600 */
-  --primary-700: #1d4ed8;    /* blue-700 */
-  --accent: #6366f1;         /* indigo-500 */
-  --warn: #f59e0b;           /* amber-500 */
-  --danger: #dc2626;         /* red-600 */
-  --success: #16a34a;        /* green-600 */
+body{
+  color:#111827;                         /* gray-900 */
+  background:#ffffff;                    /* white */
+  font:14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+       Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+  -webkit-font-smoothing:antialiased;
+  -moz-osx-font-smoothing:grayscale;
 }
 
-
-/* 2) App Layout ----------------------------------------------------------- */
-
-.workbench {
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-  gap: .75rem;
-  padding: .75rem;
-}
-
-.wb-split {
-  display: grid;
-  grid-template-columns: 1fr 440px;
-  gap: .75rem;
-  height: calc(100% - 52px);
-  min-height: 420px;
-}
-
-.section-title {
-  font-weight: 600;
-  margin: .25rem 0 .5rem;
-}
-
-.muted { color: var(--muted); font-size: 12px; }
-.small { font-size: 12px; }
-.mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-               "Liberation Mono", monospace;
-}
-
-
-/* 3) Toolbar -------------------------------------------------------------- */
-
-
-/* toolbar */
-.wb-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border-bottom: 1px solid #e5e7eb;
-  background: #fafafa;
-}
-.wb-toolbar .input {
-  flex: 1;
-  min-width: 220px;
-}
-.btn.toggle {
-  border: 1px solid #d1d5db;
-  padding: 2px 8px;
-  border-radius: 14px;
-  background: #fff;
-  font-size: 12px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-.btn.toggle.active {
-  background: #eef2ff;
-  border-color: #6366f1;
-}
-.spacer { flex: 1; }
-.muted { color: #6b7280; font-size: 12px; }
-
-/* split */
-.wb-split {
-  display: flex;
-  height: calc(100vh - 110px);
-  min-height: 520px;
-}
-.wb-left {
-  position: relative;
-  overflow: hidden;
-  background: #0f172a; /* dark canvas backdrop */
-  color: #fff;
-  display: flex;
-  flex-direction: column;
-}
-.wb-right {
-  overflow: auto;
-  padding: 12px;
-  background: #fff;
-}
-.wb-divider {
-  width: 6px;
-  background: linear-gradient(#e5e7eb, #d1d5db);
-  cursor: col-resize;
-}
-.wb-split.resizable .wb-divider:hover {
-  background: linear-gradient(#c7d2fe, #a5b4fc);
-}
-
-/* pdf stage */
-.pdf-stage {
-  position: relative;
-  margin: 8px;
-  background: #111827;
-  border-radius: 8px;
-  padding: 8px;
-  overflow: auto;
-  max-height: calc(100vh - 190px);
-}
-.pdf-stage canvas {
-  display: block;
-  background: #fff;
-  border-radius: 4px;
-}
-
-/* overlay boxes */
-.overlay .tok {
-  position: absolute;
-  border: 1px dashed rgba(255, 145, 0, 0.9);
-  background: rgba(255, 145, 0, 0.08);
-  pointer-events: none;
-}
-.overlay .pink {
-  position: absolute;
-  border: 2px solid #ec4899;
-  background: rgba(236, 72, 153, 0.12);
-  pointer-events: none;
-}
-.overlay .pink.live {
-  border-style: dashed;
-}
-
-/* page nav inline */
-.toolbar-inline {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: #e5e7eb;
-  padding: 6px 10px 0 10px;
-}
-.toolbar-inline .page-indicator {
-  font-size: 12px;
-  color: #cbd5e1;
-}
-
-/* placeholders & hints */
-.placeholder {
-  padding: 16px;
-  color: #6b7280;
-  font-size: 14px;
-}
-.hint {
-  margin-top: 8px;
-  color: #6b7280;
-  font-size: 12px;
-}
-
-/* right table */
-.field-table-wrap {
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  overflow: hidden;
-}
-.field-table-wrap table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 14px;
-}
-.field-table-wrap thead th {
-  text-align: left;
-  padding: 8px;
-  background: #f8fafc;
-  border-bottom: 1px solid #e5e7eb;
-}
-.field-table-wrap tbody td {
-  padding: 6px 8px;
-  border-bottom: 1px solid #f1f5f9;
-}
-.field-table-wrap tbody tr.missing td {
-  background: #fff7ed;
-}
-.field-table-wrap input {
-  width: 100%;
-  padding: 6px 8px;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  font: inherit;
-}
-
-.section-title {
-  font-weight: 700;
-  color: #111827;
-}
-
-/* badges */
-.badge {
-  display: inline-block;
-  background: #eef2ff;
-  color: #3730a3;
-  padding: 2px 8px;
-  border-radius: 14px;
-  font-size: 12px;
-}
-.badge.warn {
-  background: #fee2e2;
-  color: #991b1b;
-}
-
-/* last ocr preview */
-.last-ocr {
-  display: flex;
-  gap: 12px;
-  align-items: flex-start;
-  margin: 10px 8px 0;
-}
-.last-ocr img {
-  max-width: 220px;
-  border: 1px solid #e5e7eb;
-  border-radius: 4px;
-  background: #fff;
-}
-.last-ocr .caption .title {
-  font-weight: 600;
-  color: #e5e7eb;
-  margin-bottom: 4px;
-}
-.last-ocr .caption pre {
-  margin: 0;
-  padding: 6px 8px;
-  background: #0b1220;
-  color: #e5e7eb;
-  border-radius: 6px;
-  white-space: pre-wrap;
-}
-
-
-
-/* 5) PDF Stage + Overlays ------------------------------------------------- */
-
-.pdf-stage {
-  position: relative;
-  display: inline-block;
-  max-width: 100%;
-}
-
-.pdf-stage canvas {
-  display: block;
-  max-width: 100%;
-  height: auto;
-  border-radius: 6px;
-  background: #fff;
-  box-shadow: 0 1px 0 rgba(0,0,0,.02);
-}
-
-/* overlay is a full-canvas SVG for boxes & lasso */
-.overlay {
-  position: absolute;
-  inset: 0;
-  pointer-events: auto;
-}
-
-.overlay.crosshair { cursor: crosshair; }
-
-/* token/word boxes */
-.bbox-rect {
-  fill: rgba(255, 210, 0, 0.22);                 /* soft amber fill */
-  stroke: rgba(255, 160, 0, 0.95);               /* amber stroke */
-  stroke-width: 1.5;
-}
-
-.bbox-rect.selected {
-  fill: rgba(29, 78, 216, .18);                  /* blue-700 fill alpha */
-  stroke: rgba(29, 78, 216, .95);
-  stroke-width: 2;
-}
-
-.bbox-rect.drawing {
-  fill: rgba(0,0,0,.06);
-  stroke: rgba(0,0,0,.5);
-  stroke-dasharray: 4 3;
-}
-
-/* numeric label (optional) */
-.box-tag {
-  fill: rgba(17,24,39,.95);                      /* gray-900 */
-  stroke: rgba(255,255,255,.8);
-  stroke-width: .5;
-}
-
-.box-tag-text {
-  font: 11px/1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono";
-  fill: #fff;
-  text-anchor: middle;
-  dominant-baseline: middle;
-}
-
-
-/* 6) Forms & Inputs ------------------------------------------------------- */
-
-.row {
-  display: grid;
-  grid-template-columns: 120px 1fr;
-  gap: .6rem;
-  align-items: center;
-  margin-top: .4rem;
-}
-
-input[type="text"],
-input[type="search"],
-input[type="number"],
-input[type="url"],
-select,
-textarea {
-  width: 100%;
-  font: inherit;
-  padding: .48rem .6rem;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: #fff;
-  color: inherit;
-  outline: none;
-  transition: border-color .15s ease, box-shadow .15s ease;
-}
-
-textarea { resize: vertical; }
-
-input:focus,
-select:focus,
-textarea:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(99,102,241,.18);
-}
-
-.input { min-width: 360px; max-width: 60vw; }
-
-.field-list { display: flex; flex-direction: column; gap: .55rem; }
-
-.field-row {
-  display: grid;
-  grid-template-columns: 200px 1fr auto;
-  gap: .5rem;
-  align-items: center;
-}
-
-.key {
-  font-weight: 500;
-  white-space: nowrap;
-}
-
-.value-missing {
-  background: #fff7ed;               /* orange-50 */
-  border: 1px dashed #fed7aa;        /* orange-200 */
-  border-radius: 8px;
-  padding: .2rem .35rem;
-}
-
-
-/* 7) Tables --------------------------------------------------------------- */
-
-table { width: 100%; border-collapse: collapse; }
-
-th, td {
-  text-align: left;
-  padding: 6px 8px;
-  border-bottom: 1px solid #f1f5f9; /* slate-100 */
-  vertical-align: middle;
-}
-
-thead th {
-  background: #f8fafc;               /* slate-50 */
-  border-bottom: 1px solid var(--border);
-  font-weight: 600;
-}
-
-tr:hover td {
-  background: #f9fafb;               /* gray-50 */
-}
-
-tr.missing td {
-  background: #fff7ed;               /* orange-50 */
+/* ---- App Layout -------------------------------------------------------- */
+.workbench{
+  display:flex; flex-direction:column;
+  height:100vh; gap:.75rem; padding:.75rem;
+  background:#fff;
 }
 
-.badge {
-  display: inline-block;
-  padding: .15rem .4rem;
-  border-radius: 999px;
-  font-size: 12px;
-  border: 1px solid var(--border);
-  color: var(--muted);
-}
-
-.badge.success { border-color: #a7f3d0; color: var(--success); background: #ecfdf5; }
-.badge.warn    { border-color: #fed7aa; color: var(--warn);    background: #fffbeb; }
-.badge.danger  { border-color: #fecaca; color: var(--danger);  background: #fef2f2; }
-
-
-/* 8) Buttons, Badges, Chips ---------------------------------------------- */
+.section-title{ font-weight:600; margin:.25rem 0 .5rem; }
+.muted{ color:var(--muted); font-size:12px; }
+.spacer{ flex:1; }
 
-button {
-  font: inherit;
-  color: inherit;
-  background: #fff;
-  border: 1px solid var(--border);
-  padding: .46rem .75rem;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background .15s ease, border-color .15s ease, color .15s ease;
+/* ---- Toolbar ----------------------------------------------------------- */
+.wb-toolbar{
+  display:flex; align-items:center; gap:8px;
+  padding:8px 12px; background:#fff; border:1px solid var(--border); border-radius:10px;
 }
 
-button:hover { background: #f3f4f6; }              /* gray-100 */
-
-button:disabled {
-  opacity: .55;
-  cursor: not-allowed;
+.wb-toolbar .input{
+  flex:1; min-width:280px;
+  padding:.48rem .6rem; border:1px solid var(--border); border-radius:8px; background:#fff;
 }
 
-.primary {
-  background: var(--primary);
-  border-color: var(--primary);
-  color: #fff;
+.btn{
+  display:inline-flex; align-items:center; gap:.35rem;
+  padding:.44rem .72rem; border:1px solid var(--border); border-radius:8px;
+  background:#fff; cursor:pointer; transition:background .15s, border-color .15s;
 }
-
-.primary:hover { background: var(--primary-700); border-color: var(--primary-700); }
+.btn:hover{ background:#f9fafb; }
+.btn.toggle.active{ background:#f3f4f6; border-color:#d1d5db; }
 
-.btn { display: inline-flex; align-items: center; gap: .35rem; }
-
-.btn.toggle {
-  border: 1px solid var(--border);
-  background: #fff;
-  padding: .38rem .7rem;
-  border-radius: 8px;
+.primary{
+  background:var(--primary); border-color:var(--primary); color:#fff;
 }
+.primary:hover{ background:var(--primary-700); border-color:var(--primary-700); }
 
-.btn.toggle.active {
-  background: #e0e7ff;               /* indigo-100 */
-  border-color: var(--accent);
+/* ---- Split (Left 30% / Right 70%) ------------------------------------- */
+.wb-split{ display:flex; gap:12px; align-items:stretch; height:calc(100vh - 110px); }
+.wb-left{
+  flex:0 0 30%;
+  display:flex; flex-direction:column;
+  min-width:240px; overflow:auto;
+  background:#fff; border:1px solid var(--border); border-radius:10px; padding:10px;
 }
-
-.linklike {
-  color: var(--primary);
-  text-decoration: none;
+.wb-right{
+  flex:1 1 70%;
+  display:flex; flex-direction:column; overflow:auto;
+  background:#fff; border:1px solid var(--border); border-radius:10px; padding:10px;
 }
-.linklike:hover { text-decoration: underline; }
 
-
-/* 9) Helpers & Utilities -------------------------------------------------- */
-
-.pad-sm { padding: .25rem; }
-.pad    { padding: .5rem; }
-.pad-lg { padding: .9rem; }
-
-.border { border: 1px solid var(--border); border-radius: 10px; background: #fff; }
-
-.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; }
-.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: .75rem; }
-
-.flex { display: flex; gap: .5rem; }
-.flex-col { display: flex; flex-direction: column; gap: .5rem; }
-.items-center { align-items: center; }
-.justify-between { justify-content: space-between; }
-.justify-end { justify-content: flex-end; }
-.w-full { width: 100%; }
-
-.hr { height: 1px; background: var(--border); margin: .6rem 0; }
-
-.hint { color: var(--muted); font-size: 12px; margin-top: .5rem; }
-
-.kbd {
-  font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono";
-  background: #f3f4f6;
-  border: 1px solid var(--border);
-  border-bottom-color: #d1d5db;
-  border-radius: 6px;
-  padding: 2px 6px;
+/* ---- PDF Stage + Overlay ---------------------------------------------- */
+.pdf-stage{
+  position:relative; overflow:auto; background:#fff;
+  border:1px solid var(--border); border-radius:10px; padding:8px; min-height:320px;
 }
-
-
-/* 10) Responsive ---------------------------------------------------------- */
-
-@media (max-width: 1200px) {
-  .wb-split { grid-template-columns: 1fr 400px; }
+.pdf-stage canvas{
+  display:block; background:#fff; border-radius:6px;
 }
 
-@media (max-width: 1024px) {
-  .wb-split { grid-template-columns: 1fr; height: auto; }
-  .wb-right { min-height: 320px; }
-  .input { min-width: 220px; max-width: 100%; }
+/* overlay layer sized/aligned by PdfEditCanvas */
+.overlay{
+  position:absolute; inset:0; background:transparent; pointer-events:auto;
 }
 
-@media (prefers-color-scheme: dark) {
-  body { color: #e5e7eb; background: #0b1220; }
-  .wb-toolbar,
-  .wb-right { background: #0f172a; border-color: #1f2937; }
-  .wb-left { background: #0b1220; border-color: #1f2937; }
-  .placeholder, .hint, .muted { color: #9ca3af; }
-  .pdf-stage canvas { background: #111827; }
-  .bbox-rect { stroke: rgba(255, 194, 61, .95); fill: rgba(255, 194, 61, .18); }
-  button { background: #0f172a; border-color: #1f2937; color: #e5e7eb; }
-  button:hover { background: #111827; }
-  .primary { background: #2563eb; border-color: #2563eb; color: #fff; }
-  thead th { background: #0b1220; border-bottom-color: #1f2937; }
-  th, td { border-bottom-color: #1f2937; }
+/* OCR token boxes (orange) */
+.overlay .tok{
+  position:absolute;
+  border:1px solid rgba(255,165,0,.55);
+  background:rgba(255,165,0,.10);
+  pointer-events:none;
 }
 
-/* === Modal (portal) === */
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,.45);
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  padding-top: 72px;        /* keep clear of top header */
-  z-index: 100000;          /* above app header */
+/* Active edit rectangle (pink) */
+.overlay .pink{
+  position:absolute;
+  border:2px solid #ec4899;
+  background:rgba(236,72,153,.14);
+  box-shadow:0 0 0 1px rgba(236,72,153,.2) inset;
+  pointer-events:none; /* hit-testing computed in JS */
 }
+.overlay .pink.live{ border-style:dashed; }
 
-.modal-card {
-  background: #fff;
-  width: min(1100px, 96vw);
-  max-height: 86vh;
-  overflow: auto;
-  border-radius: 12px;
-  padding: 14px;
-  box-shadow: 0 10px 30px rgba(0,0,0,.30);
-  border: 1px solid var(--border);
+/* Resize handles (only shown on edge hover / resizing) */
+.overlay .handle{
+  position:absolute; width:8px; height:8px; border-radius:3px;
+  background:rgba(236,72,153,.95);
+  box-shadow:0 0 0 2px #fff inset, 0 0 0 1px rgba(236,72,153,.8);
+  pointer-events:none;
 }
-@media (prefers-color-scheme: dark) {
-  .modal-card { background: #0f172a; }
-}
 
-/* Pink edit box (field-level) */
-.overlay .bbox-rect.drawing {
-  fill: rgba(0,0,0,.06);
-  stroke: rgba(0,0,0,.5);
-  stroke-dasharray: 4 3;
+/* Page toolbar inside right panel */
+.toolbar-inline{
+  display:flex; align-items:center; gap:8px; padding:6px 2px 8px 2px;
 }
-
-.edit-handle { cursor: pointer; }
+.page-indicator{ font-size:12px; color:#374151; }
 
-@media (prefers-color-scheme: dark) {
-  /* already good; pink shows well on dark */
+/* ---- Tables ------------------------------------------------------------ */
+table{ width:100%; border-collapse:collapse; }
+thead th{
+  text-align:left; padding:8px;
+  background:#f8fafc; border-bottom:1px solid var(--border);
 }
+tbody td{ padding:6px 8px; border-bottom:1px solid #f1f5f9; }
+tr:hover td{ background:#f9fafb; }
+code{ font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono"; }
 
-/* Resizable split layout */
-.wb-split.resizable {
-  display: flex;
-  gap: 0;
-  align-items: stretch;
-  height: calc(100vh - 140px); /* adjust to your header/footer */
-  min-height: 480px;
+/* Flash cue when a value is updated from OCR */
+.flash{ animation:flashfill 900ms ease-out; }
+@keyframes flashfill{
+  0%{ background:#e6ffed; } 100%{ background:transparent; }
 }
 
-.wb-left, .wb-right {
-  display: flex;
-  flex-direction: column;
-  min-width: 220px;
-  overflow: hidden;
+/* ---- Last OCR preview -------------------------------------------------- */
+.last-ocr{ display:flex; gap:12px; align-items:flex-start; margin:10px 2px 0; }
+.last-ocr img{
+  max-width:220px; border:1px solid var(--border); border-radius:6px; background:#fff;
 }
-
-.wb-left { /* PDF gets more space by default via flexBasis in TSX */ }
-.wb-right { border-left: 1px solid #e5e7eb; background: #fafafa; }
-
-.wb-divider {
-  width: 6px;
-  cursor: col-resize;
-  background: linear-gradient(90deg, #e5e7eb, #cbd5e1, #e5e7eb);
-  border-left: 1px solid #e5e7eb;
-  border-right: 1px solid #e5e7eb;
+.last-ocr .caption .title{ font-weight:600; margin-bottom:4px; }
+.last-ocr .caption pre{
+  margin:0; padding:6px 8px; background:#f8fafc; border:1px solid var(--border);
+  border-radius:6px; white-space:pre-wrap;
 }
 
-.field-table-wrap {
-  overflow: auto;
-  flex: 1;
-  padding-right: 6px;
+/* ---- Buttons (generic) ------------------------------------------------- */
+button{
+  font:inherit; color:inherit; background:#fff;
+  border:1px solid var(--border); padding:.44rem .72rem; border-radius:8px; cursor:pointer;
+  transition:background .15s, border-color .15s;
 }
-
-/* Keep the PDF stage scrollable as needed */
-
+button:hover{ background:#f3f4f6; }
+button:disabled{ opacity:.55; cursor:not-allowed; }
 
-/* neutral, white theme */
-.workbench, .pdf-stage { background: #fff; color: #111; }
-.wb-toolbar { background: #fff; border-bottom: 1px solid #eee; }
-.btn, .btn.toggle { background: #fff; border: 1px solid #ddd; }
-.btn.toggle.active { background: #f8f8f8; }
+/* ---- Helpers ----------------------------------------------------------- */
+.placeholder{ padding:12px; color:var(--muted); font-size:14px; }
+.hint{ margin-top:8px; color:var(--muted); font-size:12px; }
 
-/* tokens and pink */
-.overlay .tok {
-  border: 1px solid rgba(255, 165, 0, 0.55);
-  background: rgba(255, 165, 0, 0.10);
+/* ---- Modal (kept for future bind dialogs) ----------------------------- */
+.modal-backdrop{
+  position:fixed; inset:0; background:rgba(0,0,0,.45);
+  display:flex; align-items:flex-start; justify-content:center;
+  padding-top:72px; z-index:100000;
 }
-.overlay .pink {
-  border: 2px solid #ec4899;
-  background: rgba(236,72,153,0.14);
-  box-shadow: 0 0 0 1px rgba(236,72,153,0.2) inset;
+.modal-card{
+  background:#fff; width:min(1100px,96vw); max-height:86vh; overflow:auto;
+  border-radius:12px; padding:14px; box-shadow:0 10px 30px rgba(0,0,0,.30);
+  border:1px solid var(--border);
 }
 
-/* flash when a value updates from OCR */
-.flash {
-  animation: flashfill 900ms ease-out;
+/* ---- Responsive -------------------------------------------------------- */
+@media (max-width: 1024px){
+  .wb-split{ flex-direction:column; height:auto; }
+  .wb-left, .wb-right{ flex:1 1 auto; }
+  .wb-toolbar .input{ min-width:200px; }
 }
-@keyframes flashfill {
-  0%   { background: #e6ffed; }
-  100% { background: transparent; }
-}
-
-.overlay .pink.live { border-style: dashed; }
-
-
-
-
-
-/* resize handles on the pink box */
-.overlay .pink .handle {
-  position: absolute;
-  width: 10px; height: 10px;
-  background: rgba(236, 72, 153, 0.95);
-  border: 1px solid white;
-}
-.overlay .pink .handle.nw { left: -5px; top: -5px; cursor: nwse-resize; }
-.overlay .pink .handle.n  { left: 50%; top: -5px; transform: translateX(-50%); cursor: ns-resize; }
-.overlay .pink .handle.ne { right: -5px; top: -5px; cursor: nesw-resize; }
-.overlay .pink .handle.e  { right: -5px; top: 50%; transform: translateY(-50%); cursor: ew-resize; }
-.overlay .pink .handle.se { right: -5px; bottom: -5px; cursor: nwse-resize; }
-.overlay .pink .handle.s  { left: 50%; bottom: -5px; transform: translateX(-50%); cursor: ns-resize; }
-.overlay .pink .handle.sw { left: -5px; bottom: -5px; cursor: nesw-resize; }
-.overlay .pink .handle.w  { left: -5px; top: 50%; transform: translateY(-50%); cursor: ew-resize; }
-
