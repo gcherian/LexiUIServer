@@ -1,7 +1,31 @@
 // File: src/tsp4/components/lasso/FieldLevelEditor.tsx
+// -----------------------------------------------------------------------------
+// Field-Level Editor (HYBRID): Distil → fallback → token-refine
+// - Left: 30% KV table (from ECM JSON upload)
+// - Right: 70% PDF canvas with token/word boxes & pink edit box
+// - When you click a KV row: 
+//      a) Try Distil result (semantic) 
+//      b) If low/missing → autoLocateByValue (local fuzzy) 
+//      c) Refine the union using the visible tokens to avoid full-line boxes
+// - Lasso/move/resize still OCRs the crop and updates the KV value live.
+// -----------------------------------------------------------------------------
+//  QUICK CLIENT NOTE (add once in lib/api.ts):
+//    export type DistilBox = { page:number; x0:number; y0:number; x1:number; y1:number };
+//    export type DistilField = { key:string; label:string; type?:string; page:number|null;
+//      key_box?:DistilBox|null; value:string; value_boxes:DistilBox[]; value_union?:DistilBox|null;
+//      confidence:number; };
+//    export async function distilExtract(doc_id:string, fields:{key:string;label:string;type?:string}[], max_window=12, dpi=260){
+//      const r = await fetch(`${API}/distil/extract`, { method:"POST", headers:{"content-type":"application/json"},
+//        body: JSON.stringify({ doc_id, fields, max_window, dpi }) });
+//      if(!r.ok) throw new Error(await r.text());
+//      return r.json() as Promise<{ doc_id:string; fields:DistilField[]; dpi:number }>;
+//    }
+// -----------------------------------------------------------------------------
+
 import React, { useEffect, useMemo, useState } from "react";
 import "../ocr.css";
 import PdfEditCanvas, { type EditRect, type TokenBox } from "./PdfEditCanvas";
+
 import {
   API,
   uploadPdf,
@@ -9,14 +33,16 @@ import {
   getBoxes,
   docIdFromUrl,
   ocrPreview,
+  // ⬇️ make sure these exist in ../../../lib/api (see quick note above)
+  distilExtract,
+  type DistilField,
 } from "../../../lib/api";
 
-/* ---------------- Types ---------------- */
+/* ========================= Types & Helpers ========================== */
 type KVRect = { page: number; x0: number; y0: number; x1: number; y1: number };
 type AnyJson = Record<string, any>;
 type FieldRow = { key: string; value: string; rects?: KVRect[] };
 
-/* ---------------- String + scoring helpers ---------------- */
 const ABBREV: Record<string, string> = {
   rd: "road", "rd.": "road",
   ave: "avenue", "ave.": "avenue", av: "avenue",
@@ -74,7 +100,7 @@ function linePenalty(span: TokenBox[]) {
   return Math.max(0, spread - avg * 0.6) / Math.max(1, avg);
 }
 
-/** Better locator: word-based, street-abbrev tolerant, unions best span */
+/** Local, fuzzy text → tokens scan (your existing fallback) */
 function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 16) {
   const raw = (valueRaw || "").trim();
   if (!raw) return null;
@@ -84,7 +110,6 @@ function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 
     ? [normNum(raw)]
     : norm(raw).split(" ").map((w) => ABBREV[w] ?? w);
 
-  // group & sort tokens per page
   const byPage = new Map<number, TokenBox[]>();
   for (const t of allTokens) {
     (byPage.get(t.page) || byPage.set(t.page, []).get(t.page)!).push(t);
@@ -152,13 +177,48 @@ function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 
   return { page: best.page, rect, score: best.score };
 }
 
-/* ---------------- Flatten nested JSON to dotted keys ---------------- */
+/** Token refinement: clip union to tokens whose centers fall inside */
+function refineWithTokens(
+  union: { page: number; x0: number; y0: number; x1: number; y1: number },
+  pageTokens: TokenBox[]
+) {
+  const inBox = (t: TokenBox) => {
+    const cx = (t.x0 + t.x1) / 2, cy = (t.y0 + t.y1) / 2;
+    const minx = Math.min(union.x0, union.x1), maxx = Math.max(union.x0, union.x1);
+    const miny = Math.min(union.y0, union.y1), maxy = Math.max(union.y0, union.y1);
+    return cx >= minx && cx <= maxx && cy >= miny && cy <= maxy;
+  };
+  const pool = pageTokens.filter(inBox);
+  if (!pool.length) return union;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const t of pool) {
+    x0 = Math.min(x0, t.x0); y0 = Math.min(y0, t.y0);
+    x1 = Math.max(x1, t.x1); y1 = Math.max(y1, t.y1);
+  }
+  return { page: union.page, x0, y0, x1, y1 };
+}
+
+/* Flatten nested ECM JSON to dotted rows; preserve rect-ish fields if present */
+function normalizeRects(x: any): KVRect[] | undefined {
+  if (!x) return undefined;
+  const arr = Array.isArray(x) ? x : [x];
+  const out: KVRect[] = [];
+  for (const b of arr) {
+    if (b && Number.isFinite(+b.page)) {
+      if (b.x != null && b.y != null && b.w != null && b.h != null) {
+        out.push({ page: +b.page, x0: +b.x, y0: +b.y, x1: +b.x + +b.w, y1: +b.y + +b.h });
+      } else {
+        out.push({ page: +b.page, x0: +b.x0, y0: +b.y0, x1: +b.x1, y1: +b.y1 });
+      }
+    }
+  }
+  return out.length ? out : undefined;
+}
+function tryStr(v: any) { try { return typeof v === "string" ? v : JSON.stringify(v); } catch { return String(v); } }
 type FlatKV = { key: string; value: string; rects?: KVRect[] };
 function flattenJson(obj: any, prefix = ""): FlatKV[] {
   const rows: FlatKV[] = [];
-  const push = (k: string, v: any) =>
-    rows.push({ key: k, value: v == null ? "" : String(v) });
-
+  const push = (k: string, v: any) => rows.push({ key: k, value: v == null ? "" : String(v) });
   if (obj === null || obj === undefined) return [{ key: prefix || "(null)", value: "" }];
 
   if (Array.isArray(obj)) {
@@ -169,21 +229,15 @@ function flattenJson(obj: any, prefix = ""): FlatKV[] {
     });
     return rows;
   }
-
   if (typeof obj !== "object") return [{ key: prefix || "(value)", value: String(obj) }];
 
   for (const k of Object.keys(obj)) {
     const path = prefix ? `${prefix}.${k}` : k;
     const v = obj[k];
     if (v && typeof v === "object" && !Array.isArray(v)) {
-      // try to extract rect info patterns
       const rects = normalizeRects(v.bboxes || v.boxes || v.bbox || v.rects);
       if ("value" in v || rects) {
-        rows.push({
-          key: path,
-          value: "value" in v ? String(v.value ?? "") : tryStr(v),
-          rects,
-        });
+        rows.push({ key: path, value: "value" in v ? String(v.value ?? "") : tryStr(v), rects });
       } else {
         rows.push(...flattenJson(v, path));
       }
@@ -195,44 +249,9 @@ function flattenJson(obj: any, prefix = ""): FlatKV[] {
   }
   return rows;
 }
-function tryStr(v: any) {
-  try {
-    return typeof v === "string" ? v : JSON.stringify(v);
-  } catch {
-    return String(v);
-  }
-}
-function normalizeRects(x: any): KVRect[] | undefined {
-  if (!x) return undefined;
-  const arr = Array.isArray(x) ? x : [x];
-  const out: KVRect[] = [];
-  for (const b of arr) {
-    if (b && Number.isFinite(+b.page)) {
-      // support either x0/x1/y0/y1 or x/y/w/h
-      const hasXYWH = b.x != null && b.y != null && b.w != null && b.h != null;
-      if (hasXYWH) {
-        out.push({
-          page: +b.page,
-          x0: +b.x,
-          y0: +b.y,
-          x1: +b.x + +b.w,
-          y1: +b.y + +b.h,
-        });
-      } else {
-        out.push({
-          page: +b.page,
-          x0: +b.x0,
-          y0: +b.y0,
-          x1: +b.x1,
-          y1: +b.y1,
-        });
-      }
-    }
-  }
-  return out.length ? out : undefined;
-}
 
-/* ---------------- Component ---------------- */
+/* ========================= Component ========================== */
+
 export default function FieldLevelEditor() {
   // doc + page
   const [docUrl, setDocUrl] = useState("");
@@ -248,15 +267,19 @@ export default function FieldLevelEditor() {
   const [rows, setRows] = useState<FieldRow[]>([]);
   const [focusedKey, setFocusedKey] = useState("");
 
-  // overlays + zoom
+  // overlays
   const [rect, setRect] = useState<EditRect | null>(null);
   const [showBoxes, setShowBoxes] = useState(false); // default OFF
   const [lastCrop, setLastCrop] = useState<{ url?: string; text?: string } | null>(null);
+
+  // optional zoom
   const [zoom, setZoom] = useState(1);
 
-  // flash cue on OCR update
-  const [flashKey, setFlashKey] = useState<string>("");
+  // Distil results cache
+  const [distil, setDistil] = useState<DistilField[]>([]);
+  const DISTIL_OK = 0.45; // tune threshold if needed
 
+  /* -------- Uploads -------- */
   async function onUploadPdf(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
     if (!f) return;
@@ -280,11 +303,7 @@ export default function FieldLevelEditor() {
     try {
       const parsed = JSON.parse(await f.text()) as AnyJson;
       const flat = flattenJson(parsed);
-      const fr: FieldRow[] = flat.map((kv) => ({
-        key: kv.key,
-        value: kv.value,
-        rects: kv.rects, // may be undefined
-      }));
+      const fr: FieldRow[] = flat.map((kv) => ({ key: kv.key, value: kv.value, rects: kv.rects }));
       setRows(fr);
       setFocusedKey("");
       setRect(null);
@@ -295,7 +314,7 @@ export default function FieldLevelEditor() {
     }
   }
 
-  // Paste /data/{doc}/original.pdf
+  /* -------- Paste /data/{doc}/original.pdf -------- */
   useEffect(() => {
     const id = docIdFromUrl(docUrl);
     if (!id) return;
@@ -309,34 +328,55 @@ export default function FieldLevelEditor() {
     })();
   }, [docUrl]);
 
-  function centerOnRect(rr: EditRect) {
-    const stage = document.querySelector(".pdf-stage") as HTMLElement | null;
-    const overlay = document.querySelector(".pdf-stage .overlay") as HTMLElement | null;
-    if (!stage || !overlay) return;
-
-    const R = overlay.getBoundingClientRect();
-    const sx = R.width / (meta[rr.page - 1]?.w || 1);
-    const sy = R.height / (meta[rr.page - 1]?.h || 1);
-
-    const cx = ((Math.min(rr.x0, rr.x1) + Math.max(rr.x0, rr.x1)) / 2) * sx;
-    const cy = ((Math.min(rr.y0, rr.y1) + Math.max(rr.y0, rr.y1)) / 2) * sy;
-
-    stage.scrollTo({
-      left: Math.max(0, cx - stage.clientWidth / 2),
-      top: Math.max(0, cy - stage.clientHeight / 2),
-      behavior: "smooth",
+  /* -------- Distil Runner (best-effort; no hard dependency) -------- */
+  async function runDistilNow() {
+    if (!docId || !rows.length) return;
+    // Build field specs (type hinting improves accuracy for numeric/date/amount)
+    const specs = rows.map((r) => {
+      const k = r.key.toLowerCase();
+      const type =
+        k.includes("zip") ? "zip" :
+        k.includes("date") ? "date" :
+        k.includes("amount") || k.includes("total") ? "amount" : "text";
+      const label = r.key.replace(/\./g, " ").replace(/\[\d+\]/g, " ").replace(/\s+/g, " ").trim();
+      return { key: r.key, label, type };
     });
+    try {
+      const res = await distilExtract(docId, specs, 12, 260);
+      setDistil(res.fields || []);
+    } catch (e) {
+      console.warn("distil failed; hybrid will use fallback only", e);
+      setDistil([]);
+    }
   }
 
-  // left click → pink highlight (prefer JSON rects; else token match; else best single token)
+  // Auto-run when both PDF + rows are ready; still optional (UI works either way)
+  useEffect(() => {
+    if (docId && rows.length) runDistilNow();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docId, rows.length]);
+
+  /* -------- Row click: Distil → fallback → refine -------- */
   function onRowClick(r: FieldRow) {
     setFocusedKey(r.key);
 
-    // prefer rects from JSON, union same-page
-    const rects = r.rects || [];
-    if (rects.length) {
+    // A) Distil (if present & confident)
+    const d = distil.find((f) => f.key === r.key && f.page != null);
+    if (d && (d.confidence ?? 0) >= DISTIL_OK && d.value_union) {
+      const pg = d.value_union.page!;
+      const refined = refineWithTokens(
+        { page: pg, x0: d.value_union.x0, y0: d.value_union.y0, x1: d.value_union.x1, y1: d.value_union.y1 },
+        tokens.filter((t) => t.page === pg)
+      );
+      setPage(pg);
+      setRect(refined);
+      return;
+    }
+
+    // B) ECM JSON-provided rects (if any)
+    if (r.rects?.length) {
       const byPg: Record<number, KVRect[]> = {};
-      rects.forEach((b) => (byPg[b.page] = byPg[b.page] ? [...byPg[b.page], b] : [b]));
+      r.rects.forEach((b) => (byPg[b.page] = byPg[b.page] ? [...byPg[b.page], b] : [b]));
       const pg = Number(Object.keys(byPg).sort((a, b) => byPg[+b].length - byPg[+a].length)[0]);
       const same = byPg[pg];
       const uni = same.reduce(
@@ -349,84 +389,66 @@ export default function FieldLevelEditor() {
         }),
         { page: pg, x0: same[0].x0, y0: same[0].y0, x1: same[0].x1, y1: same[0].y1 }
       );
+      const refined = refineWithTokens(uni, tokens.filter((t) => t.page === pg));
       setPage(pg);
-      const rr = { page: pg, x0: uni.x0, y0: uni.y0, x1: uni.x1, y1: uni.y1 };
-      setRect(rr);
-      requestAnimationFrame(() => centerOnRect(rr));
+      setRect(refined);
       return;
     }
 
-    // token auto-locate
+    // C) Local fuzzy auto-locate (fallback)
     const hit = autoLocateByValue(r.value, tokens);
     if (hit) {
+      const refined = refineWithTokens({ page: hit.page, ...hit.rect }, tokens.filter((t) => t.page === hit.page));
       setPage(hit.page);
-      const rr = { page: hit.page, ...hit.rect };
-      setRect(rr);
-      requestAnimationFrame(() => centerOnRect(rr));
-      return;
-    }
-
-    // hard fallback: best single token
-    let best: TokenBox | null = null;
-    let bestScore = 0;
-    for (const t of tokens) {
-      const s = levRatio(norm(t.text || ""), norm(r.value || ""));
-      if (s > bestScore) {
-        bestScore = s;
-        best = t;
-      }
-    }
-    if (best) {
-      setPage(best.page);
-      const rr = { page: best.page, x0: best.x0, y0: best.y0, x1: best.x1, y1: best.y1 };
-      setRect(rr);
-      requestAnimationFrame(() => centerOnRect(rr));
+      setRect(refined);
     } else {
       setRect(null);
     }
   }
 
-  // Lasso/move/resize commit → OCR preview and update KV value
+  /* -------- Lasso/move/resize → OCR preview + update KV -------- */
   async function onRectCommitted(rr: EditRect) {
     if (!focusedKey) return;
     try {
       if (docId) {
         const res = await ocrPreview(docId, rr.page, rr);
-        const val = (res?.text || "").trim();
-        setLastCrop({ url: res?.crop_url, text: val });
+        const text = (res?.text || "").trim();
+        setLastCrop({ url: res?.crop_url, text });
 
+        // Update KV list inline for the focused key
         setRows((prev) =>
           prev.map((row) =>
-            row.key === focusedKey ? { ...row, value: val, rects: [{ page: rr.page, ...rr }] } : row
+            row.key === focusedKey
+              ? { ...row, value: text, rects: [{ page: rr.page, x0: rr.x0, y0: rr.y0, x1: rr.x1, y1: rr.y1 }] }
+              : row
           )
         );
-
-        setFlashKey(focusedKey);
-        setTimeout(() => setFlashKey(""), 900);
       }
     } catch {
-      /* preview is best effort */
+      /* preview is best-effort */
     }
   }
 
   const serverW = meta[page - 1]?.w || 1;
   const serverH = meta[page - 1]?.h || 1;
 
+  /* ========================= Render ========================== */
+
   return (
     <div className="workbench">
       <div className="wb-toolbar" style={{ gap: 8 }}>
         <span style={{ fontWeight: 600 }}>Choose:</span>
 
-        {/* Choose PDF */}
+        {/* PDF uploader */}
         <label className="btn">
           <input type="file" accept="application/pdf" onChange={onUploadPdf} style={{ display: "none" }} />
-          Choose PDF
+          PDF
         </label>
 
-        {/* Choose JSON */}
+        {/* ECM uploader */}
         <label className="btn">
           <input type="file" accept="application/json" onChange={onUploadEcm} style={{ display: "none" }} />
-          Choose JSON
+          ECM JSON
         </label>
 
         <input
@@ -441,9 +463,11 @@ export default function FieldLevelEditor() {
           <input type="checkbox" checked={showBoxes} onChange={() => setShowBoxes((v) => !v)} /> Boxes
         </label>
 
+        <button onClick={runDistilNow} disabled={!docId || !rows.length}>Refresh Distil</button>
+
         <span className="spacer" />
 
-        {/* Zoom */}
+        {/* Simple zoom cluster */}
         <div className="toolbar-inline" style={{ gap: 4 }}>
           <button onClick={() => setZoom((z) => Math.max(0.5, Math.round((z - 0.1) * 10) / 10))}>–</button>
           <span style={{ width: 44, textAlign: "center" }}>{Math.round(zoom * 100)}%</span>
@@ -475,10 +499,7 @@ export default function FieldLevelEditor() {
                       style={focused ? { outline: "2px solid #ec4899", outlineOffset: -2 } : undefined}
                     >
                       <td><code>{r.key}</code></td>
-                      <td
-                        className={r.key === flashKey ? "flash" : undefined}
-                        style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
-                      >
+                      <td style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                         {r.value}
                       </td>
                     </tr>
@@ -527,15 +548,6 @@ export default function FieldLevelEditor() {
           )}
         </div>
       </div>
-
-      {/* Inline tiny CSS for "flash" cue (white theme friendly) */}
-      <style>{`
-        .flash { animation: flashfill 900ms ease-out; }
-        @keyframes flashfill {
-          0%   { background: #e6ffed; }
-          100% { background: transparent; }
-        }
-      `}</style>
     </div>
   );
 }
