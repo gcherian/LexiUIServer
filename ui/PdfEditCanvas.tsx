@@ -1,5 +1,5 @@
 // File: src/tsp4/components/lasso/PdfEditCanvas.tsx
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef } from "react";
 import {
   GlobalWorkerOptions,
   getDocument,
@@ -8,12 +8,13 @@ import {
 } from "pdfjs-dist";
 import "pdfjs-dist/web/pdf_viewer.css";
 
-/** Vite + pdfjs-dist v4 worker (MJS!) */
+/** Vite + pdfjs-dist v4 worker (MJS) */
 GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
   import.meta.url
 ).toString();
 
+/* ========================= Types ========================= */
 export type TokenBox = {
   page: number;
   x0: number;
@@ -23,7 +24,13 @@ export type TokenBox = {
   text?: string;
 };
 
-export type EditRect = { page: number; x0: number; y0: number; x1: number; y1: number };
+export type EditRect = {
+  page: number;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+};
 
 type Props = {
   docUrl: string;
@@ -65,7 +72,6 @@ export default function PdfEditCanvas({
 
   const baseCanvas = useRef<HTMLCanvasElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
-  const stageRef = useRef<HTMLDivElement | null>(null);
 
   /** Snapshot of overlay client rect (stable pointer math) */
   const overlayBox = useRef<DOMRect | null>(null);
@@ -89,10 +95,7 @@ export default function PdfEditCanvas({
 
   const drag = useRef<DragState>({ mode: "none" });
 
-  // show handles only on edge/corner hover (or while resizing)
-  const [hoverHandle, setHoverHandle] = useState<Handle>("new");
-
-  // ---------------- Rendering ----------------
+  /* ---------------- Rendering ---------------- */
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -105,11 +108,12 @@ export default function PdfEditCanvas({
       if (cancelled) return;
       pageRef.current = pg;
 
-      const rot = (pg.rotate || 0) % 360;
-      const vp1 = pg.getViewport({ scale: 1, rotation: rot });
+      // Keep rotation as in PDF so OCR coords match original raster (server rendered at rotation=0).
+      // We render at rotation=0 so server px == canvas px (this was your stable setup).
+      const vp1 = pg.getViewport({ scale: 1, rotation: 0 });
       const maxDisplay = 1400; // soft cap
       const baseScale = Math.min(1, maxDisplay / Math.max(vp1.width, vp1.height));
-      const vp = pg.getViewport({ scale: baseScale * zoom, rotation: rot });
+      const vp = pg.getViewport({ scale: baseScale * zoom, rotation: 0 });
 
       const c = baseCanvas.current!;
       const ctx = c.getContext("2d")!;
@@ -120,8 +124,10 @@ export default function PdfEditCanvas({
 
       await pg.render({ canvasContext: ctx, viewport: vp }).promise;
 
-      // align overlay to canvas (offset + size)
-      syncOverlayToCanvas();
+      if (overlayRef.current) {
+        overlayRef.current.style.width = c.style.width;
+        overlayRef.current.style.height = c.style.height;
+      }
 
       drawOverlay();
     })();
@@ -131,29 +137,15 @@ export default function PdfEditCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [docUrl, page, zoom]);
 
-  /** Keep overlay perfectly aligned with the canvas */
-  function syncOverlayToCanvas() {
-    const stage = stageRef.current;
-    const c = baseCanvas.current;
-    const o = overlayRef.current;
-    if (!stage || !c || !o) return;
-
-    const stageR = stage.getBoundingClientRect();
-    const cR = c.getBoundingClientRect();
-
-    o.style.position = "absolute";
-    o.style.left = `${Math.round(cR.left - stageR.left)}px`;
-    o.style.top = `${Math.round(cR.top - stageR.top)}px`;
-    o.style.width = `${Math.floor(cR.width)}px`;
-    o.style.height = `${Math.floor(cR.height)}px`;
-  }
-
-  /** Also keep overlay aligned on size changes (split drag, zoom, etc.) */
+  /** Keep overlay sized with the canvas (split drag, resizes, etc.) */
   useLayoutEffect(() => {
     const c = baseCanvas.current;
-    if (!c) return;
+    const o = overlayRef.current;
+    if (!c || !o) return;
     const ro = new ResizeObserver(() => {
-      syncOverlayToCanvas();
+      const r = c.getBoundingClientRect();
+      o.style.width = `${Math.floor(r.width)}px`;
+      o.style.height = `${Math.floor(r.height)}px`;
       drawOverlay();
     });
     ro.observe(c);
@@ -161,7 +153,7 @@ export default function PdfEditCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ---------------- Helpers ----------------
+  /* ---------------- Helpers ---------------- */
   function cssToOcr(xCss: number, yCss: number) {
     const R = overlayBox.current!;
     const sx = serverW / R.width;
@@ -219,7 +211,7 @@ export default function PdfEditCanvas({
     }
   }
 
-  // ---------------- Mouse events ----------------
+  /* ---------------- Mouse events ---------------- */
   function onMouseDown(e: React.MouseEvent) {
     if (!editable || !overlayRef.current) return;
     overlayBox.current = overlayRef.current.getBoundingClientRect();
@@ -248,12 +240,11 @@ export default function PdfEditCanvas({
   function onMouseMove(e: React.MouseEvent) {
     if (!overlayRef.current) return;
 
-    // Update cursor + hover handles when idle
+    // Update cursor shape when idle
     if (drag.current.mode === "none") {
       const R = overlayRef.current.getBoundingClientRect();
       const h = hitHandle(e.clientX - R.left, e.clientY - R.top);
-      setHoverHandle(h);
-      overlayRef.current.style.cursor = editable ? cursorForHandle(h === "inside" ? "inside" : h) : "default";
+      overlayRef.current.style.cursor = editable ? cursorForHandle(h) : "default";
       return;
     }
 
@@ -296,10 +287,10 @@ export default function PdfEditCanvas({
 
     if (drag.current.mode === "resize") {
       const o = drag.current.orig;
-      const R2 = overlayBox.current!;
+
       // convert css delta -> ocr delta
-      const sx = serverW / R2.width;
-      const sy = serverH / R2.height;
+      const sx = serverW / R.width;
+      const sy = serverH / R.height;
       const dX = Math.round(dxCss * sx);
       const dY = Math.round(dyCss * sy);
 
@@ -333,7 +324,7 @@ export default function PdfEditCanvas({
     drag.current = { mode: "none" };
   }
 
-  // ---------------- Overlay drawing ----------------
+  /* ---------------- Overlay drawing ---------------- */
   function drawOverlay() {
     const overlay = overlayRef.current;
     if (!overlay) return;
@@ -354,32 +345,30 @@ export default function PdfEditCanvas({
       placeCss(box, rect.x0, rect.y0, rect.x1, rect.y1);
       overlay.appendChild(box);
 
-      // Handles only when hovering an edge/corner OR resizing
-      const rc = rectCss();
-      if (
-        rc &&
-        (drag.current.mode === "resize" ||
-          ["nw","n","ne","e","se","s","sw","w"].includes(String(hoverHandle)))
-      ) {
-        const hs: Array<[Handle, number, number, string]> = [
-          ["nw", rc.x0, rc.y0, "nwse-resize"],
-          ["n", (rc.x0 + rc.x1) / 2, rc.y0, "ns-resize"],
-          ["ne", rc.x1, rc.y0, "nesw-resize"],
-          ["e", rc.x1, (rc.y0 + rc.y1) / 2, "ew-resize"],
-          ["se", rc.x1, rc.y1, "nwse-resize"],
-          ["s", (rc.x0 + rc.x1) / 2, rc.y1, "ns-resize"],
-          ["sw", rc.x0, rc.y1, "nesw-resize"],
-          ["w", rc.x0, (rc.y0 + rc.y1) / 2, "ew-resize"],
-        ];
-        for (const [, x, y, cur] of hs) {
-          const h = document.createElement("div");
-          h.className = "handle";
-          h.style.left = `${x - HANDLE / 2}px`;
-          h.style.top = `${y - HANDLE / 2}px`;
-          h.style.width = `${HANDLE}px`;
-          h.style.height = `${HANDLE}px`;
-          h.style.cursor = cur;
-          overlay.appendChild(h);
+      // Handles (draw only when editable)
+      if (editable) {
+        const rc = rectCss();
+        if (rc) {
+          const hs: Array<[number, number, string]> = [
+            [rc.x0, rc.y0, "nwse-resize"],
+            [(rc.x0 + rc.x1) / 2, rc.y0, "ns-resize"],
+            [rc.x1, rc.y0, "nesw-resize"],
+            [rc.x1, (rc.y0 + rc.y1) / 2, "ew-resize"],
+            [rc.x1, rc.y1, "nwse-resize"],
+            [(rc.x0 + rc.x1) / 2, rc.y1, "ns-resize"],
+            [rc.x0, rc.y1, "nesw-resize"],
+            [rc.x0, (rc.y0 + rc.y1) / 2, "ew-resize"],
+          ];
+          for (const [x, y, cur] of hs) {
+            const h = document.createElement("div");
+            h.className = "handle";
+            h.style.left = `${x - HANDLE / 2}px`;
+            h.style.top = `${y - HANDLE / 2}px`;
+            h.style.width = `${HANDLE}px`;
+            h.style.height = `${HANDLE}px`;
+            h.style.cursor = cur;
+            overlay.appendChild(h);
+          }
         }
       }
     }
@@ -402,10 +391,10 @@ export default function PdfEditCanvas({
   useEffect(() => {
     drawOverlay();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tokens, rect, showTokenBoxes, page, serverW, serverH, hoverHandle]);
+  }, [tokens, rect, showTokenBoxes, page, serverW, serverH]);
 
   return (
-    <div ref={stageRef} className="pdf-stage" style={{ position: "relative", overflow: "auto", background: "#fff" }}>
+    <div className="pdf-stage" style={{ position: "relative", overflow: "auto" }}>
       <canvas ref={baseCanvas} />
       <div
         ref={overlayRef}
@@ -415,6 +404,7 @@ export default function PdfEditCanvas({
         onMouseUp={onMouseUp}
         style={{
           position: "absolute",
+          inset: 0,
           background: "transparent",
           cursor:
             drag.current.mode === "move"
@@ -432,9 +422,9 @@ export default function PdfEditCanvas({
           pointer-events: none;
         }
         .overlay .pink {
-          border: 2px solid #ec4899;
-          background: rgba(236,72,153,0.14);
-          box-shadow: 0 0 0 1px rgba(236,72,153,0.2) inset;
+          border: 2px solid rgba(236, 72, 153, 0.95);
+          background: rgba(236, 72, 153, 0.18);
+          box-shadow: 0 0 0 1px rgba(236,72,153,0.25) inset;
           pointer-events: none;
         }
         .overlay .handle {
@@ -442,14 +432,14 @@ export default function PdfEditCanvas({
           border-radius: 3px;
           background: rgba(236,72,153,0.95);
           box-shadow: 0 0 0 2px #fff inset, 0 0 0 1px rgba(236,72,153,0.8);
-          pointer-events: none; /* purely visual */
+          pointer-events: none;
         }
       `}</style>
     </div>
   );
 }
 
-// ---------------- utils ----------------
+/* ========================= utils ========================= */
 function clamp(v: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, v));
 }
