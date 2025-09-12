@@ -49,3 +49,27 @@ async function onRowClick(r: FieldRow) {
     } catch { /* best-effort, ignore */ }
   }
 }
+
+async function runDistilExtract(docId: string, fields: { key: string; label: string; type?: string }[]) {
+  const res = await fetch(`${API}/distil/extract`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ doc_id: docId, fields, dpi: 260 }),
+  });
+  if (!res.ok) throw new Error("distil extract failed");
+  return res.json();
+}
+
+const distilRes = await runDistilExtract(docId, rows.map(r => ({ key: r.key, label: r.key })));
+setRows(rows.map(r => {
+  const match = distilRes.fields.find(f => f.key === r.key);
+  return match ? { ...r, rects: match.value_boxes } : r;
+}));
+
+
+from src import distil_kv
+distil_kv.init_paths(Path(__file__).parent)  # sets up DATA paths
+app.include_router(distil_kv.router)
+
+
+
