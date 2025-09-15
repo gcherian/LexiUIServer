@@ -1,0 +1,54 @@
+                ┌───────────────────────┐
+                │   PDF / Image Upload  │
+                └──────────┬────────────┘
+                           │
+            ┌──────────────▼──────────────┐
+            │   Ingestion & Fusion Layer  │
+            │  (PaddleOCR + pdfminer)     │
+            │ → unified token JSON schema │
+            └──────────────┬──────────────┘
+                           │
+        ┌──────────────────▼──────────────────┐
+        │   Classifier Service                │
+        │   (CLIP embeddings + vector store)  │
+        │ → {doctype, confidence, top_k}      │
+        └──────────────┬──────────────────────┘
+                       │
+   ┌───────────────────▼───────────────────┐
+   │   Extractor Service                   │
+   │   (LayoutLMv3, disambiguator fallback)│
+   │ → {field_path, text, bbox, conf}      │
+   └───────────────┬───────────────────────┘
+                   │
+   ┌───────────────▼───────────────────────┐
+   │   Validator Service                    │
+   │   (schemas, regex, cross-field rules)  │
+   │ → green/yellow/red + reasons           │
+   └───────────────┬───────────────────────┘
+                   │
+   ┌───────────────▼───────────────────────┐
+   │   HITL Workbench (UI)                  │
+   │   • PDF viewer + token overlay         │
+   │   • Lasso/move/resize corrections      │
+   │   • Guided yellow→green workflow       │
+   └───────────────┬───────────────────────┘
+                   │
+   ┌───────────────▼───────────────────────┐
+   │   Feedback Capture                     │
+   │   • correction events                  │
+   │   • doc_id, field_path, old→new, bbox  │
+   └───────────────┬───────────────────────┘
+                   │
+   ┌───────────────▼───────────────────────┐
+   │   Learning Loop                        │
+   │   • nightly supervised fine-tune       │
+   │   • bandit policy update (routing)     │
+   │   • vector store upserts               │
+   └───────────────┬───────────────────────┘
+                   │
+   ┌───────────────▼───────────────────────┐
+   │   Model Registry & Serving             │
+   │   • ≤100 MB artifacts, WF-ready        │
+   │   • Canary + rollback flags            │
+   │   • Stateless microservices            │
+   └────────────────────────────────────────┘
