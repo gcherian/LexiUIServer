@@ -249,3 +249,108 @@ return (
     {/* your existing interactive edit rect (pink), token boxes, etc. */}
   </div>
 );
+
+
+//
+// add with other imports
+import { matchField, type MatchResp } from "../../../lib/api";
+
+// state for overlays
+const [overlays, setOverlays] = useState<OverlayRect[]>([]);
+
+// toggle TF-IDF drawing if you want three boxes
+const DRAW_TFIDF = false;
+
+//
+
+<PdfEditCanvas
+  // ...existing props...
+  overlays={overlays}
+/>
+
+//
+async function onRowClick(r: FieldRow) {
+  setFocusedKey(r.key);
+
+  // Build tokens payload for server (your TokenBox -> server shape)
+  const ocrTokens = tokens.map(t => ({
+    text: t.text || "",
+    bbox: [t.x0, t.y0, t.x1, t.y1] as [number,number,number,number],
+    page: t.page
+  }));
+
+  const keyLabel = r.key.replace(/\./g, " ").replace(/\[\d+\]/g, " ").replace(/\s+/g, " ").trim();
+
+  let resp: MatchResp | null = null;
+  try {
+    resp = await matchField(ocrTokens, keyLabel, r.key, r.value, true);
+  } catch (e) {
+    console.warn("match/field failed; skipping method overlays", e);
+    resp = null;
+  }
+
+  // Build colored overlays from response
+  const ov: OverlayRect[] = [];
+  const push = (m: MatchResp["autolocate"] | undefined | null, color: string, label: string) => {
+    if (!m?.bbox || !m.page) return;
+    const [x0,y0,x1,y1] = m.bbox;
+    ov.push({ page: m.page, x0, y0, x1, y1, color, label, alpha: 0.20 });
+  };
+  if (resp) {
+    push(resp.autolocate, "#1f7ae0", "autolocate"); // blue
+    push(resp.bert,       "#7a1fe0", "bert");       // purple
+    if (DRAW_TFIDF) push(resp.tfidf, "#e07a1f", "tfidf"); // orange
+  }
+  setOverlays(ov);
+
+  // Choose a pink edit rect, priority: BERT -> AUTO -> TFIDF -> existing fallbacks
+  const choose = (m: MatchResp["autolocate"] | undefined | null) => {
+    if (!m?.bbox || !m.page) return null;
+    const [x0,y0,x1,y1] = m.bbox;
+    return refineWithTokens({ page: m.page, x0, y0, x1, y1 }, tokens.filter(t => t.page === m.page));
+  };
+
+  let chosen = choose(resp?.bert) || choose(resp?.autolocate) || (DRAW_TFIDF ? choose(resp?.tfidf) : null);
+
+  // Fall back to your previous logic if server returned nothing useful
+  if (!chosen) {
+    // Distil first (if confident)
+    const d = distil.find((f) => f.key === r.key && f.page != null);
+    if (d && (d.confidence ?? 0) >= DISTIL_OK && d.value_union) {
+      const pg = d.value_union.page!;
+      chosen = refineWithTokens(
+        { page: pg, x0: d.value_union.x0, y0: d.value_union.y0, x1: d.value_union.x1, y1: d.value_union.y1 },
+        tokens.filter((t) => t.page === pg)
+      );
+    }
+  }
+  if (!chosen && r.rects?.length) {
+    const byPg: Record<number, KVRect[]> = {};
+    r.rects.forEach((b) => (byPg[b.page] = byPg[b.page] ? [...byPg[b.page], b] : [b]));
+    const pg = Number(Object.keys(byPg).sort((a, b) => byPg[+b].length - byPg[+a].length)[0]);
+    const same = byPg[pg];
+    const uni = same.reduce(
+      (acc, rr) => ({
+        page: pg,
+        x0: Math.min(acc.x0, rr.x0),
+        y0: Math.min(acc.y0, rr.y0),
+        x1: Math.max(acc.x1, rr.x1),
+        y1: Math.max(acc.y1, rr.y1),
+      }),
+      { page: pg, x0: same[0].x0, y0: same[0].y0, x1: same[0].x1, y1: same[0].y1 }
+    );
+    chosen = refineWithTokens(uni, tokens.filter((t) => t.page === pg));
+  }
+  if (!chosen) {
+    const hit = autoLocateByValue(r.value, tokens);
+    if (hit) chosen = refineWithTokens({ page: hit.page, ...hit.rect }, tokens.filter((t) => t.page === hit.page));
+  }
+
+  if (ov.length && ov[0].page !== page) setPage(ov[0].page);
+  if (chosen) {
+    if (chosen.page !== page) setPage(chosen.page);
+    setRect(chosen);
+  } else {
+    setRect(null);
+  }
+}
