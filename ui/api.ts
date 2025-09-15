@@ -130,3 +130,39 @@ export async function distilExtract(
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
+
+
+//
+/* ---------------- Match (autolocate/bert/tfidf) ---------------- */
+
+export type MatchBox = {
+  text?: string;
+  conf?: number;
+  bbox?: [number, number, number, number];
+  page?: number;
+};
+
+export type MatchResp = {
+  field: string;
+  llm_value: string;
+  autolocate?: MatchBox | null;
+  bert?: MatchBox | null;
+  tfidf?: MatchBox | null;
+};
+
+export async function matchField(
+  ocrTokens: { text: string; bbox: [number, number, number, number]; page: number }[],
+  key: string,
+  field: string,
+  llm_value: string,
+  use_bert = true
+): Promise<MatchResp> {
+  const r = await fetch(`${API}/match/field`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ocr_tokens: ocrTokens, key, field, llm_value, use_bert }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+//
