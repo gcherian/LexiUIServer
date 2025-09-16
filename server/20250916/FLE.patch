@@ -1,0 +1,88 @@
+*** a/src/tsp4/components/lasso/FieldLevelEditor.tsx
+--- b/src/tsp4/components/lasso/FieldLevelEditor.tsx
+@@
+ import PdfEditCanvas, { type EditRect, type TokenBox } from "./PdfEditCanvas";
+@@
+   distilExtract,
+   type DistilField,
++  matchField,
+ } from "../../../lib/api";
+@@
++// overlay colors
++const COLORS: Record<string,string> = {
++  fuzzy: "#22c55e",
++  tfidf: "#3b82f6",
++  minilm: "#a855f7",
++  distilbert: "#ef4444",
++  layoutlmv3: "#f59e0b",
++};
++
++type Overlay = { label:string; color:string; rect: EditRect | null };
+@@
+   // overlays
+   const [rect, setRect] = useState<EditRect | null>(null);
++  const [overlays, setOverlays] = useState<Overlay[]>([]);
+   const [showBoxes, setShowBoxes] = useState(false); // default OFF
+@@
+   function onRowClick(r: FieldRow) {
+     setFocusedKey(r.key);
+@@
+-      return;
++      // don't early return; we still want to compute overlays below
++      // but keep the rect set for the main edit box
+@@
+     if (r.rects?.length) {
+@@
+-      return;
++      // keep going to draw overlays too
+     }
+@@
+     if (hit) {
+       const refined = refineWithTokens({ page: hit.page, ...hit.rect }, tokens.filter((t) => t.page === hit.page));
+       setPage(hit.page);
+       setRect(refined);
+     } else {
+       setRect(null);
+     }
++
++    // ---------- fetch 5-method overlays ----------
++    (async () => {
++      try {
++        if (!docId) return;
++        const res = await matchField(docId, r.key, r.value);
++        const pick = (m: any): EditRect | null =>
++          !m ? null : ({ page: m.page, x0: m.rect.x0, y0: m.rect.y0, x1: m.rect.x1, y1: m.rect.y1 });
++        const ovs: Overlay[] = (["fuzzy","tfidf","minilm","distilbert","layoutlmv3"] as const).map((k) => ({
++          label: k,
++          color: COLORS[k],
++          rect: pick((res as any).methods?.[k]),
++        }));
++        // If no rect selected yet, jump to first available overlay page
++        if (!rect) {
++          const pg = ovs.find(o => o.rect)?.rect?.page;
++          if (pg) setPage(pg);
++        }
++        setOverlays(ovs);
++      } catch (e) {
++        console.warn("matchField failed", e);
++        setOverlays([]);
++      }
++    })();
+   }
+@@
+       <div className="wb-right" style={{ flexBasis: "70%", overflow: "auto" }}>
+@@
+               <PdfEditCanvas
+                 docUrl={docUrl}
+                 page={page}
+                 serverW={serverW}
+                 serverH={serverH}
+                 tokens={tokensPage}
+                 rect={rect}
++                overlays={overlays}
+                 showTokenBoxes={showBoxes}
+                 editable={true}
+                 onRectChange={setRect}
+                 onRectCommit={onRectCommitted}
+                 zoom={zoom}
+               />

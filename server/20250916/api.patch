@@ -1,0 +1,50 @@
+*** a/ui/lib/api.ts
+--- b/ui/lib/api.ts
+@@
+ export const API = BASE;
+@@
+ export type DistilExtractResp = {
+   doc_id: string;
+   fields: DistilField[];
+   dpi: number;
+ };
++
++// -------- Match (5-method) ----------
++export type MatchBox = { page:number; rect:{x0:number;y0:number;x1:number;y1:number}; score:number };
++export type MatchResp = {
++  doc_id: string;
++  key: string;
++  value: string;
++  methods: {
++    fuzzy: MatchBox | null;
++    tfidf: MatchBox | null;
++    minilm: MatchBox | null;
++    distilbert: MatchBox | null;
++    layoutlmv3: MatchBox | null;
++  };
++};
+@@
+ export async function distilExtract(
+   doc_id: string,
+   fields: { key: string; label: string; type?: string }[],
+   max_window = 12,
+   dpi = 260
+ ): Promise<DistilExtractResp> {
+@@
+   return r.json();
+ }
++
++export async function matchField(
++  doc_id: string,
++  key: string,
++  value: string,
++  page_hint?: number
++): Promise<MatchResp> {
++  const r = await fetch(`${API}/lasso/match/field`, {
++    method: "POST",
++    headers: { "content-type": "application/json" },
++    body: JSON.stringify({ doc_id, key, value, page_hint }),
++  });
++  if (!r.ok) throw new Error(await r.text());
++  return r.json();
++}

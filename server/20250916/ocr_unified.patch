@@ -1,0 +1,316 @@
+*** a/src/routers/ocr_unified.py
+--- b/src/routers/ocr_unified.py
+@@
+ from uuid import uuid4
+ import shutil, json, time, difflib, re
++import os
++from pathlib import Path
+@@
+ router = APIRouter(prefix="/lasso", tags=["lasso"])
+@@
+ PUBLIC_BASE: str = "http://localhost:8000"
+ 
+ _EMB_MODEL = None  # sentence-transformers model (lazy)
++
++# === Local model root (NO NETWORK) ===========================================
++# We will look for models ONLY under this folder (default: <repo>/src/models).
++MODELS_ROOT: Path = Path(os.environ.get(
++    "MODELS_ROOT",
++    str((Path(__file__).resolve().parent.parent / "models").resolve())
++))
+@@
+ try:
+     import torch
+-    from transformers import AutoTokenizer, AutoModel
++    from transformers import AutoTokenizer, AutoModel, AutoProcessor, LayoutLMv3Model
+ except Exception:
+     torch = None
+     AutoTokenizer = None
+     AutoModel = None
++    AutoProcessor = None
++    LayoutLMv3Model = None
+@@
+ try:
+     from rdflib import Graph, Namespace, Literal, RDF, URIRef
+ except Exception:
+     Graph = None  # KG becomes a no-op
++
++# MiniLM (sentence-transformers)
++try:
++    from sentence_transformers import SentenceTransformer
++except Exception:
++    SentenceTransformer = None
+@@
+-_RERANK = {"tok": None, "mdl": None, "device": "cpu"}  # DistilBERT
++_RERANK = {"tok": None, "mdl": None, "device": "cpu"}  # DistilBERT (local-only)
++_MINILM = None
++_LLMV3 = {"proc": None, "mdl": None, "device": "cpu"}
+@@
+-def _ensure_reranker(model_name_or_path: str = "distilbert-base-uncased"):
+-    if AutoTokenizer is None or AutoModel is None:
+-        raise HTTPException(500, "Transformers not available on server.")
+-    if _RERANK["mdl"] is not None:
+-        return
+-    dev = "cuda" if torch and torch.cuda.is_available() else "cpu"
+-    tok = AutoTokenizer.from_pretrained(model_name_or_path)
+-    mdl = AutoModel.from_pretrained(model_name_or_path)
+-    mdl.to(dev)
+-    mdl.eval()
+-    _RERANK["tok"] = tok
+-    _RERANK["mdl"] = mdl
+-    _RERANK["device"] = dev
+-    print(f"[ocr_lasso] DistilBERT reranker loaded on {dev} ({model_name_or_path})")
++def _ensure_reranker(model_name_or_path: str = "distilbert-base-uncased"):
++    """
++    LOCAL-ONLY loader:
++      - Looks for weights ONLY under src/models (or MODELS_ROOT env)
++      - Uses local_files_only=True (never hits network)
++      - If missing: keeps Distil disabled; other methods still work.
++    """
++    if AutoTokenizer is None or AutoModel is None:
++        return  # transformers not installed; skip gracefully
++    if _RERANK["mdl"] is not None:
++        return
++    candidates = [
++        MODELS_ROOT / "distilbert-base-uncased",
++        MODELS_ROOT / "DistilBERT" / "distilbert-base-uncased",
++    ]
++    local_dir = next((p for p in candidates if p.exists() and p.is_dir()), None)
++    if not local_dir:
++        print("[unified] DistilBERT local weights not found; skipping.")
++        return
++    dev = "cuda" if torch and torch.cuda.is_available() else "cpu"
++    tok = AutoTokenizer.from_pretrained(str(local_dir), local_files_only=True)
++    mdl = AutoModel.from_pretrained(str(local_dir), local_files_only=True)
++    mdl.to(dev); mdl.eval()
++    _RERANK.update({"tok": tok, "mdl": mdl, "device": dev})
++    print(f"[unified] DistilBERT loaded locally from {local_dir} on {dev}")
++
++def _load_minilm_local():
++    """Return a SentenceTransformer loaded from disk, or None if missing."""
++    global _MINILM
++    if _MINILM is not None:
++        return _MINILM
++    if SentenceTransformer is None:
++        return None
++    candidates = [
++        MODELS_ROOT / "sentence-transformers" / "all-MiniLM-L6-v2",
++        MODELS_ROOT / "sentence-transformers__all-MiniLM-L6-v2",
++        MODELS_ROOT / "all-MiniLM-L6-v2",
++        MODELS_ROOT / "MiniLML6-v2",  # your custom folder name
++    ]
++    path = next((p for p in candidates if p.exists() and p.is_dir()), None)
++    if not path:
++        return None
++    _MINILM = SentenceTransformer(str(path))
++    print(f"[unified] MiniLM loaded locally from {path}")
++    return _MINILM
++
++def _load_layoutlmv3_local():
++    """Optional: if you add this model later, we’ll use a light heuristic; no network."""
++    if AutoProcessor is None or LayoutLMv3Model is None:
++        return None
++    if _LLMV3["mdl"] is not None:
++        return _LLMV3
++    candidates = [
++        MODELS_ROOT / "microsoft" / "layoutlmv3-base",
++        MODELS_ROOT / "microsoft__layoutlmv3-base",
++        MODELS_ROOT / "layoutlmv3-base",
++    ]
++    path = next((p for p in candidates if p.exists() and p.is_dir()), None)
++    if not path:
++        return None
++    dev = "cuda" if torch and torch.cuda.is_available() else "cpu"
++    proc = AutoProcessor.from_pretrained(str(path), local_files_only=True)
++    mdl = LayoutLMv3Model.from_pretrained(str(path), local_files_only=True)
++    mdl.to(dev).eval()
++    _LLMV3.update({"proc": proc, "mdl": mdl, "device": dev})
++    print(f"[unified] LayoutLMv3 loaded locally from {path} on {dev}")
++    return _LLMV3
+@@
+ def _embed(texts):
+     tok = _RERANK["tok"]; mdl = _RERANK["mdl"]; dev = _RERANK["device"]
+     with torch.no_grad():
+         batch = tok(texts, padding=True, truncation=True, max_length=256, return_tensors="pt").to(dev)
+         out = mdl(**batch).last_hidden_state  # [B, T, H]
+@@
+ class RerankReq(BaseModel):
+@@
+ @router.post("/rerank")
+ async def rerank(req: RerankReq):
+@@
+-    if AutoTokenizer is None:
+-        raise HTTPException(500, "Transformers not installed on server.")
+-    _ensure_reranker(req.model or "distilbert-base-uncased")
++    # LOCAL ONLY: attempt to load; if missing, return empty (no network)
++    _ensure_reranker(req.model or "distilbert-base-uncased")
++    if _RERANK["mdl"] is None:
++        return {"best": None, "alts": []}
+@@
+     return {
+         "best": {"page": best["page"], "rect": best["rect"], "score": best["score"]},
+         "alts": [{"page": a["page"], "rect": a["rect"], "score": a["score"]} for a in alts]
+     }
++
++# ========================== 5-method matcher (local only) =====================
++from pydantic import BaseModel
++from sklearn.feature_extraction.text import TfidfVectorizer
++from sklearn.metrics.pairwise import cosine_similarity
++from rapidfuzz import fuzz as _rfuzz
++import numpy as _np
++
++def _norm_text(s: str) -> str:
++    return " ".join((s or "").strip().lower().split())
++
++def _union_rect(span):
++    return {"x0": float(min(t["x0"] for t in span)),
++            "y0": float(min(t["y0"] for t in span)),
++            "x1": float(max(t["x1"] for t in span)),
++            "y1": float(max(t["y1"] for t in span))}
++
++def _slide_windows(tokens_page, max_w=12):
++    n = len(tokens_page)
++    for i in range(n):
++        acc = []
++        for w in range(max_w):
++            j = i + w
++            if j >= n: break
++            txt = (tokens_page[j].get("text") or "").strip()
++            if not txt: continue
++            acc.append(tokens_page[j])
++            yield acc
++
++def _context_snippet(tokens_page, span, px_margin=120, py_margin=35) -> str:
++    R = _union_rect(span)
++    x0 = R["x0"] - px_margin; y0 = R["y0"] - py_margin
++    x1 = R["x1"] + px_margin; y1 = R["y1"] + py_margin
++    bag = [t for t in tokens_page if not (t["x1"] < x0 or t["x0"] > x1 or t["y1"] < y0 or t["y0"] > y1)]
++    bag.sort(key=lambda r: (r["y0"], r["x0"]))
++    return _norm_text(" ".join((t.get("text") or "") for t in bag))
++
++def _cos_np(a: _np.ndarray, b: _np.ndarray) -> float:
++    na = float(_np.linalg.norm(a)); nb = float(_np.linalg.norm(b))
++    if na < 1e-9 or nb < 1e-9: return 0.0
++    return float(_np.clip(a @ b / (na * nb), 0.0, 1.0))
++
++def _score_fuzzy(val: str, span_text: str) -> float:
++    try:
++        return float(_rfuzz.QRatio(val, span_text) / 100.0)
++    except Exception:
++        return 0.0
++
++def _score_tfidf(vec: TfidfVectorizer, q: str, ctx: str) -> float:
++    X = vec.transform([q, ctx])
++    return float(_np.clip(cosine_similarity(X[0], X[1])[0, 0], 0, 1))
++
++def _embed_minilm(model, texts):
++    return model.encode(texts, normalize_embeddings=True, convert_to_numpy=True)
++
++def _embed_distil(tok, mdl, device, texts):
++    with torch.no_grad():
++        t = tok(texts, padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
++        h = mdl(**t).last_hidden_state.mean(dim=1)
++        h = torch.nn.functional.normalize(h, dim=1)
++        return h.cpu().numpy()
++
++class MatchReq(BaseModel):
++    doc_id: str
++    key: str
++    value: str
++    page_hint: int | None = None
++    max_window: int = 12
++
++@router.post("/match/field")
++async def match_field(req: MatchReq):
++    bp = boxes_path(req.doc_id)
++    mp = meta_path(req.doc_id)
++    if not bp.exists() or not mp.exists():
++        raise HTTPException(404, "Document tokens/meta missing.")
++    tokens = json.loads(bp.read_text())
++
++    # group tokens by page
++    pages = {}
++    for t in tokens:
++        pg = int(t["page"])
++        pages.setdefault(pg, []).append(t)
++    for arr in pages.values():
++        arr.sort(key=lambda r: (r["y0"], r["x0"]))
++
++    key = _norm_text(req.key)
++    val = _norm_text(req.value)
++    q = f"{key}: {val}".strip()
++
++    # per-page tf-idf
++    tfidf = {}
++    for pg, toks in pages.items():
++        corpus = [" ".join((t.get("text") or "").strip() for t in toks)]
++        vec = TfidfVectorizer(ngram_range=(1,2), lowercase=True)
++        try: vec.fit(corpus)
++        except ValueError: vec.fit(["placeholder"])
++        tfidf[pg] = vec
++
++    def pick_best(scored):
++        if not scored: return None
++        scored.sort(key=lambda x: x["score"], reverse=True)
++        b = scored[0]
++        return {"page": int(b["page"]), "rect": b["rect"], "score": float(b["score"])}
++
++    results = {"fuzzy": None, "tfidf": None, "minilm": None, "distilbert": None, "layoutlmv3": None}
++
++    # prepare local models
++    minilm = _load_minilm_local()
++    _ensure_reranker("distilbert-base-uncased")
++    distil_ok = _RERANK["mdl"] is not None
++    lv3 = _load_layoutlmv3_local()  # optional
++
++    pages_iter = [(req.page_hint, pages.get(req.page_hint))] if req.page_hint in pages else pages.items()
++
++    # Score all windows once per method
++    for method in ("fuzzy", "tfidf", "minilm", "distilbert"):
++        scored = []
++        if method == "minilm" and minilm is None: results["minilm"] = None; continue
++        if method == "distilbert" and not distil_ok: results["distilbert"] = None; continue
++        for pg, toks in pages_iter:
++            if not toks: continue
++            for span in _slide_windows(toks, max_w=req.max_window):
++                ctx = _context_snippet(toks, span)
++                rect = _union_rect(span)
++                if method == "fuzzy":
++                    s = _score_fuzzy(val, _norm_text(" ".join((t.get("text") or "") for t in span)))
++                elif method == "tfidf":
++                    s = _score_tfidf(tfidf[pg], q, ctx)
++                elif method == "minilm":
++                    E = _embed_minilm(minilm, [q, ctx]); s = _cos_np(E[0], E[1])
++                else:
++                    E = _embed_distil(_RERANK["tok"], _RERANK["mdl"], _RERANK["device"], [q, ctx]); s = _cos_np(E[0], E[1])
++                # penalize multi-line unions a bit
++                ys = sorted([(t["y0"] + t["y1"]) * 0.5 for t in span])
++                spread = (ys[-1] - ys[0]) if len(ys) > 1 else 0.0
++                avg_h = _np.mean([t["y1"] - t["y0"] for t in span]) if span else 1.0
++                penalty = max(0.0, (spread - 0.6 * avg_h)) / max(1.0, avg_h)
++                s = float(max(0.0, s - 0.12 * penalty))
++                scored.append({"page": pg, "rect": rect, "score": s})
++        results[method] = pick_best(scored)
++
++    # LayoutLMv3 (heuristic boost around tf-idf); only if weights present
++    if lv3 and lv3["mdl"] is not None:
++        scored = []
++        for pg, toks in pages.items():
++            for span in _slide_windows(toks, max_w=req.max_window):
++                ctx = _context_snippet(toks, span)
++                rect = _union_rect(span)
++                base = _score_tfidf(tfidf[pg], q, ctx)
++                kwords = [w for w in key.split() if len(w) >= 2]
++                near = 0
++                x0 = rect["x0"] - 80; y0 = rect["y0"] - 40; x1 = rect["x1"] + 80; y1 = rect["y1"] + 40
++                for t in toks:
++                    if t["x1"] < x0 or t["x0"] > x1 or t["y1"] < y0 or t["y0"] > y1: continue
++                    tx = _norm_text(t.get("text") or "")
++                    if any(w in tx for w in kwords): near += 1
++                s = float(min(1.0, base + 0.05 * min(near, 6)))
++                scored.append({"page": pg, "rect": rect, "score": s})
++        results["layoutlmv3"] = pick_best(scored)
++    else:
++        results["layoutlmv3"] = None
++
++    return {"doc_id": req.doc_id, "key": req.key, "value": req.value, "methods": results}

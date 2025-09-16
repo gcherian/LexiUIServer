@@ -1,0 +1,89 @@
+*** a/src/tsp4/components/lasso/PdfEditCanvas.tsx
+--- b/src/tsp4/components/lasso/PdfEditCanvas.tsx
+@@
+ export type EditRect = {
+   page: number;
+   x0: number;
+   y0: number;
+   x1: number;
+   y1: number;
+ };
+ 
++export type OverlayRect = {
++  label: string;            // e.g., "fuzzy" | "tfidf" | "minilm" | "distilbert" | "layoutlmv3"
++  color: string;            // CSS color (stroke/fill)
++  rect: EditRect | null;    // null -> not drawn
++};
++
+ type Props = {
+   docUrl: string;
+   page: number;
+@@
+   rect: EditRect | null;
++  overlays?: OverlayRect[];
+   showTokenBoxes: boolean;
+   editable: boolean;
+@@
+ export default function PdfEditCanvas({
+   docUrl,
+   page,
+   serverW,
+   serverH,
+   tokens,
+   rect,
++  overlays = [],
+   showTokenBoxes,
+   editable,
+   onRectChange,
+   onRectCommit,
+   zoom = 1,
+ }: Props) {
+@@
+   function drawOverlay() {
+     const overlay = overlayRef.current;
+     if (!overlay) return;
+     overlay.innerHTML = "";
+@@
+     if (rect && rect.page === page) {
+       const box = document.createElement("div");
+       box.className = "pink";
+       placeCss(box, rect.x0, rect.y0, rect.x1, rect.y1);
+       overlay.appendChild(box);
+@@
+       }
+     }
++
++    // === Model overlays (non-editable) ===
++    if (overlays && overlays.length) {
++      for (const ov of overlays) {
++        if (!ov || !ov.rect || ov.rect.page !== page) continue;
++        const d = document.createElement("div");
++        placeCss(d, ov.rect.x0, ov.rect.y0, ov.rect.x1, ov.rect.y1);
++        d.style.position = "absolute";
++        d.style.border = `2px solid ${ov.color}`;
++        d.style.background = `${ov.color}22`;
++        d.style.boxShadow = `0 0 0 1px ${ov.color}55 inset`;
++        d.style.pointerEvents = "none";
++        d.title = ov.label;
++        overlay.appendChild(d);
++      }
++    }
+   }
+@@
+       <style>{`
+         .overlay .tok {
+           border: 1px solid rgba(255, 165, 0, 0.55);
+           background: rgba(255, 165, 0, 0.10);
+           pointer-events: none;
+         }
+         .overlay .pink {
+           border: 2px solid rgba(236, 72, 153, 0.95);
+           background: rgba(236, 72, 153, 0.18);
+           box-shadow: 0 0 0 1px rgba(236,72,153,0.25) inset;
+           pointer-events: none;
+         }
++        /* model overlays share inline styles; no class needed */
+       `}</style>
+     </div>
+   );
+ }
