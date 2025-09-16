@@ -1,0 +1,79 @@
+*** a/src/routers/ocr_unified.py
+--- b/src/routers/ocr_unified.py
+@@
+-    key = _norm_text(req.key)
+-    val = _norm_text(req.value)
+-    q = f"{key}: {val}".strip()
++    key = _norm_text(req.key)
++    val = _norm_text(req.value)
++    # Queries for TF-IDF: value-centered
++    q_val = val
++    q_combo = f"{key} {val}".strip()
+@@
+-    # per-page tf-idf
++    # per-page tf-idf (fit on page text; lightweight but enough for ranking)
+     tfidf = {}
+     for pg, toks in pages.items():
+         corpus = [" ".join((t.get("text") or "").strip() for t in toks)]
+         vec = TfidfVectorizer(ngram_range=(1,2), lowercase=True)
+         try: vec.fit(corpus)
+         except ValueError: vec.fit(["placeholder"])
+         tfidf[pg] = vec
+@@
+-    for method in ("fuzzy", "tfidf", "minilm", "distilbert"):
++    for method in ("fuzzy", "tfidf", "minilm", "distilbert"):
+         scored = []
+         if method == "minilm" and minilm is None: results["minilm"] = None; continue
+         if method == "distilbert" and not distil_ok: results["distilbert"] = None; continue
+         for pg, toks in pages_iter:
+             if not toks: continue
+             for span in _slide_windows(toks, max_w=req.max_window):
+-                ctx = _context_snippet(toks, span)
++                ctx = _context_snippet(toks, span)
+                 rect = _union_rect(span)
+-                if method == "fuzzy":
+-                    s = _score_fuzzy(val, _norm_text(" ".join((t.get("text") or "") for t in span)))
+-                elif method == "tfidf":
+-                    s = _score_tfidf(tfidf[pg], q, ctx)
++                span_text = _norm_text(" ".join((t.get("text") or "") for t in span))
++                if method == "fuzzy":
++                    s = _score_fuzzy(val, span_text)
++                elif method == "tfidf":
++                    # value-centric TF-IDF:
++                    #  - compute similarity to SPAN text (value-heavy)
++                    #  - compute similarity to CONTEXT with key terms removed (to avoid label bias)
++                    #  - blend with higher weight on span
++                    # remove key tokens from context
++                    if key:
++                        # crude but effective: drop key words from ctx
++                        for kw in key.split():
++                            if len(kw) >= 2:
++                                ctx = ctx.replace(kw, " ")
++                        ctx = _norm_text(ctx)
++                    s_span  = _score_tfidf(tfidf[pg], q_val, span_text)
++                    s_ctx   = _score_tfidf(tfidf[pg], q_val, ctx) if ctx else 0.0
++                    s_combo = _score_tfidf(tfidf[pg], q_combo, ctx) if ctx else 0.0
++                    # coverage bonus: fraction of value tokens seen in span
++                    v_toks = [w for w in val.split() if w]
++                    if v_toks:
++                        covered = 0
++                        span_words = span_text.split()
++                        for w in v_toks:
++                            # light fuzzy equality
++                            covered += any((_rfuzz.QRatio(w, sw) >= 90) for sw in span_words)
++                        coverage = covered / max(1, len(v_toks))
++                    else:
++                        coverage = 0.0
++                    # final TF-IDF score (favor span; include a bit of context & coverage)
++                    s = 0.70 * s_span + 0.20 * max(s_ctx, s_combo) + 0.10 * coverage
+                 elif method == "minilm":
+                     E = _embed_minilm(minilm, [q, ctx]); s = _cos_np(E[0], E[1])
+                 else:
+                     E = _embed_distil(_RERANK["tok"], _RERANK["mdl"], _RERANK["device"], [q, ctx]); s = _cos_np(E[0], E[1])
+                 # penalize multi-line unions a bit
+                 ys = sorted([(t["y0"] + t["y1"]) * 0.5 for t in span])
+                 spread = (ys[-1] - ys[0]) if len(ys) > 1 else 0.0
+                 avg_h = _np.mean([t["y1"] - t["y0"] for t in span]) if span else 1.0
+                 penalty = max(0.0, (spread - 0.6 * avg_h)) / max(1.0, avg_h)
+                 s = float(max(0.0, s - 0.12 * penalty))
+                 scored.append({"page": pg, "rect": rect, "score": s})
