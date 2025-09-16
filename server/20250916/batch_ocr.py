@@ -95,3 +95,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+## from repo root
+python scripts/batch_ocr.py --root EDIP-Extraction --data data --dpi 260 --lang eng
+# re-run only missing; add --force to rebuild everything
