@@ -1,0 +1,528 @@
+#!/usr/bin/env python3
+# validate_html.py
+# Generate an HTML accuracy report for 5 methods (autolocate, tfidf, minilm, distilbert, layoutlmv3)
+# comparing predicted box text vs LLM extraction JSON.
+
+from __future__ import annotations
+import argparse, json, math, base64, io
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+
+import numpy as np
+from PIL import Image, ImageOps
+from rapidfuzz import fuzz as _rfuzz
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
+# Optional local models (no network)
+try:
+    import torch
+    from transformers import AutoTokenizer, AutoModel, AutoProcessor, LayoutLMv3Model
+except Exception:
+    torch = None
+    AutoTokenizer = AutoModel = AutoProcessor = LayoutLMv3Model = None
+
+try:
+    from sentence_transformers import SentenceTransformer
+except Exception:
+    SentenceTransformer = None
+
+# ---------- Normalization & metrics ----------
+def norm(s: str) -> str:
+    return " ".join((s or "").strip().lower().replace("\u00A0"," ").split())
+
+def norm_num(s: str) -> str:
+    return " ".join((s or "").lower().replace(",","").replace("$"," ").split())
+
+def qratio(a: str, b: str) -> float:
+    return float(_rfuzz.QRatio(a, b)) / 100.0
+
+def iou(a: Dict[str,float], b: Dict[str,float]) -> float:
+    ax0, ay0, ax1, ay1 = min(a["x0"],a["x1"]), min(a["y0"],a["y1"]), max(a["x0"],a["x1"]), max(a["y0"],a["y1"])
+    bx0, by0, bx1, by1 = min(b["x0"],b["x1"]), min(b["y0"],b["y1"]), max(b["x0"],b["x1"]), max(b["y0"],b["y1"])
+    inter_x0, inter_y0 = max(ax0, bx0), max(ay0, by0)
+    inter_x1, inter_y1 = min(ax1, bx1), min(ay1, by1)
+    iw, ih = max(0.0, inter_x1 - inter_x0), max(0.0, inter_y1 - inter_y0)
+    inter = iw * ih
+    if inter <= 0: return 0.0
+    area_a = max(0.0, ax1 - ax0) * max(0.0, ay1 - ay0)
+    area_b = max(0.0, bx1 - bx0) * max(0.0, by0 - by1)  # typo guard
+    area_b = max(0.0, bx1 - bx0) * max(0.0, by1 - by0)
+    den = area_a + area_b - inter
+    return float(inter / den) if den > 0 else 0.0
+
+def union_rect(span):
+    return {
+        "x0": float(min(t["x0"] for t in span)),
+        "y0": float(min(t["y0"] for t in span)),
+        "x1": float(max(t["x1"] for t in span)),
+        "y1": float(max(t["y1"] for t in span)),
+    }
+
+def context_snippet(tokens_page, span, px_margin=120, py_margin=35):
+    R = union_rect(span)
+    cx0 = R["x0"] - px_margin; cy0 = R["y0"] - py_margin
+    cx1 = R["x1"] + px_margin; cy1 = R["y1"] + py_margin
+    bag = [t for t in tokens_page if not (t["x1"] < cx0 or t["x0"] > cx1 or t["y1"] < cy0 or t["y0"] > cy1)]
+    bag.sort(key=lambda r: (r["y0"], r["x0"]))
+    return norm(" ".join(t.get("text","") for t in bag if t.get("text")))
+
+def slide_windows(tokens_page, max_w=12):
+    n = len(tokens_page)
+    for i in range(n):
+        acc = []
+        for w in range(max_w):
+            j = i + w
+            if j >= n: break
+            txt = (tokens_page[j].get("text") or "").strip()
+            if not txt: continue
+            acc.append(tokens_page[j])
+            yield acc
+
+# ---------- Token text from rect ----------
+def text_from_rect(tokens_page, rect) -> str:
+    x0, y0, x1, y1 = min(rect["x0"],rect["x1"]), min(rect["y0"],rect["y1"]), max(rect["x0"],rect["x1"]), max(rect["y0"],rect["y1"])
+    bag = [t for t in tokens_page if not (t["x1"] < x0 or t["x0"] > x1 or t["y1"] < y0 or t["y0"] > y1)]
+    bag.sort(key=lambda r: (r["y0"], r["x0"]))
+    return norm(" ".join(t.get("text","") for t in bag if t.get("text")))
+
+# ---------- Crop OCR on rect ----------
+def crop_ocr(pdf_path: Path, page_no: int, rect, dpi=260, lang="eng") -> str:
+    # rasterize just the page, then crop, then OCR best-of-PSM
+    import pypdfium2 as pdfium
+    from PIL import ImageOps
+    pdf = pdfium.PdfDocument(str(pdf_path))
+    if page_no < 1 or page_no > len(pdf): return ""
+    pil = pdf[page_no-1].render(scale=(dpi/72)).to_pil()
+    gray = ImageOps.autocontrast(pil.convert("L"))
+    x0 = int(min(rect["x0"], rect["x1"])); y0 = int(min(rect["y0"], rect["y1"]))
+    x1 = int(max(rect["x0"], rect["x1"])); y1 = int(max(rect["y0"], rect["y1"]))
+    x0 = max(0, x0-4); y0 = max(0, y0-4)
+    x1 = min(gray.width-1, x1+4); y1 = min(gray.height-1, y1+4)
+    crop = gray.crop((x0,y0,x1,y1))
+    if crop.width < 140 or crop.height < 40:
+        scale = 3 if max(crop.width,crop.height) < 60 else 2
+        crop = crop.resize((crop.width*scale, crop.height*scale), Image.BICUBIC)
+    import pytesseract
+    def ocr(psm:int):
+        cfg = f"--oem 1 --psm {psm} -c preserve_interword_spaces=1"
+        return pytesseract.image_to_string(crop, lang=lang, config=cfg).strip()
+    cands = [(len(s), s) for s in (ocr(6), ocr(7), ocr(11))]
+    return (sorted(cands, reverse=True)[0][1] if cands else "").strip()
+
+# ---------- Local model loading ----------
+@dataclass
+class DistilLocal:
+    tok: Any
+    mdl: Any
+    device: str
+
+def find_first_existing(paths: List[Path]) -> Optional[Path]:
+    for p in paths:
+        if p.exists() and p.is_dir():
+            return p
+    return None
+
+def load_minilm(models_root: Path):
+    if SentenceTransformer is None: return None
+    p = find_first_existing([
+        models_root / "sentence-transformers" / "all-MiniLM-L6-v2",
+        models_root / "sentence-transformers__all-MiniLM-L6-v2",
+        models_root / "all-MiniLM-L6-v2",
+        models_root / "MiniLML6-v2",
+    ])
+    if not p: return None
+    print(f"[model] MiniLM: {p}")
+    return SentenceTransformer(str(p))
+
+def load_distilbert(models_root: Path) -> Optional[DistilLocal]:
+    if AutoTokenizer is None or AutoModel is None: return None
+    p = find_first_existing([
+        models_root / "distilbert-base-uncased",
+        models_root / "DistilBERT" / "distilbert-base-uncased",
+    ])
+    if not p: return None
+    print(f"[model] DistilBERT: {p}")
+    tok = AutoTokenizer.from_pretrained(str(p), local_files_only=True)
+    mdl = AutoModel.from_pretrained(str(p), local_files_only=True)
+    dev = "cuda" if torch and torch.cuda.is_available() else "cpu"
+    mdl.to(dev).eval()
+    return DistilLocal(tok, mdl, dev)
+
+def load_layoutlmv3(models_root: Path):
+    if AutoProcessor is None or LayoutLMv3Model is None: return None
+    p = find_first_existing([
+        models_root / "microsoft" / "layoutlmv3-base",
+        models_root / "microsoft__layoutlmv3-base",
+        models_root / "layoutlmv3-base",
+    ])
+    if not p: return None
+    print(f"[model] LayoutLMv3: {p}")
+    proc = AutoProcessor.from_pretrained(str(p), local_files_only=True)
+    mdl  = LayoutLMv3Model.from_pretrained(str(p), local_files_only=True)
+    dev = "cuda" if torch and torch.cuda.is_available() else "cpu"
+    mdl.to(dev).eval()
+    return {"proc": proc, "mdl": mdl, "device": dev}
+
+# ---------- Embedding helpers ----------
+def embed_minilm(model, texts):
+    return model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
+
+def embed_distil(local: DistilLocal, texts):
+    with torch.no_grad():
+        t = local.tok(texts, padding=True, truncation=True, return_tensors="pt", max_length=256).to(local.device)
+        out = local.mdl(**t).last_hidden_state
+        mask = t["attention_mask"].unsqueeze(-1)
+        summed = (out * mask).sum(1)
+        counts = mask.sum(1).clamp(min=1)
+        emb = torch.nn.functional.normalize(summed / counts, dim=1)
+        return emb.cpu().numpy()
+
+def cos_np(a: np.ndarray, b: np.ndarray) -> float:
+    na = float(np.linalg.norm(a)); nb = float(np.linalg.norm(b))
+    if na < 1e-9 or nb < 1e-9: return 0.0
+    return float(np.clip(a @ b / (na * nb), 0.0, 1.0))
+
+# ---------- TF-IDF ----------
+def tfidf_fit(text: str) -> TfidfVectorizer:
+    vec = TfidfVectorizer(ngram_range=(1,2), lowercase=True)
+    try: vec.fit([text])
+    except ValueError: vec.fit(["placeholder"])
+    return vec
+
+# ---------- Load OCR artifacts ----------
+def load_tokens(meta_path: Path, boxes_path: Path):
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    boxes = json.loads(boxes_path.read_text(encoding="utf-8"))
+    by_page: Dict[int, List[Dict[str,Any]]] = {}
+    for b in boxes:
+        pg = int(b["page"])
+        by_page.setdefault(pg, []).append(b)
+    for arr in by_page.values():
+        arr.sort(key=lambda r: (r["y0"], r["x0"]))
+    return meta, by_page
+
+# ---------- GT loader ----------
+def load_extraction(stem: Path) -> Optional[List[Tuple[str,str,Optional[List[Dict[str,Any]]]]]]:
+    p = stem.with_suffix(".json")
+    if not p.exists(): return None
+    try:
+        obj = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    rows = []
+    def norm_rects(x):
+        if not x: return None
+        arr = x if isinstance(x,list) else [x]
+        out = []
+        for b in arr:
+            try:
+                page = int(b.get("page"))
+                if "w" in b and "h" in b and "x" in b and "y" in b:
+                    out.append({"page": page, "x0": float(b["x"]), "y0": float(b["y"]),
+                                "x1": float(b["x"])+float(b["w"]), "y1": float(b["y"])+float(b["h"])})
+                else:
+                    out.append({"page": page, "x0": float(b["x0"]), "y0": float(b["y0"]),
+                                "x1": float(b["x1"]), "y1": float(b["y1"])})
+            except Exception:
+                pass
+        return out or None
+
+    if isinstance(obj, dict) and "fields" in obj and isinstance(obj["fields"], list):
+        for f in obj["fields"]:
+            key = f.get("key") or f.get("name")
+            val = f.get("value")
+            rects = f.get("rects") or f.get("bboxes") or f.get("bbox")
+            if key and val is not None:
+                rows.append((str(key), str(val), norm_rects(rects)))
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(v, dict) and "value" in v:
+                rows.append((k, str(v.get("value","")), norm_rects(v.get("rects") or v.get("bboxes") or v.get("bbox"))))
+            elif isinstance(v, (str,int,float)):
+                rows.append((k, str(v), None))
+    return rows
+
+# ---------- Scoring / selection ----------
+def fuzzy_score(val_text: str, span_text: str, span):
+    s = qratio(val_text, span_text)
+    ys = sorted([(t["y0"]+t["y1"])*0.5 for t in span])
+    spread = (ys[-1]-ys[0]) if len(ys)>1 else 0.0
+    avg_h = np.mean([t["y1"]-t["y0"] for t in span]) if span else 1.0
+    penalty = max(0.0, (spread - 0.6*avg_h)) / max(1.0, avg_h)
+    return float(max(0.0, s - 0.12*penalty))
+
+def best_boxes(tokens_by_page, key, value, max_window, minilm_model, distil_local, lv3, tfidf_cache):
+    val_norm = norm(value)
+    combo = f"{norm(key)} {val_norm}".strip()
+
+    def pick(scored):
+        if not scored: return None
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        b = scored[0]
+        return {"page": int(b["page"]), "rect": b["rect"], "score": float(b["score"])}
+
+    out = {"autolocate": None, "tfidf": None, "minilm": None, "distilbert": None, "layoutlmv3": None}
+
+    for method in ("autolocate","tfidf","minilm","distilbert"):
+        if method=="minilm" and minilm_model is None: continue
+        if method=="distilbert" and distil_local is None: continue
+        scored = []
+        for pg, toks in tokens_by_page.items():
+            vec = tfidf_cache[pg]
+            for span in slide_windows(toks, max_w=max_window):
+                rect = union_rect(span)
+                stext = norm(" ".join((t.get("text") or "") for t in span))
+                ctx = context_snippet(toks, span)
+
+                if method == "autolocate":
+                    s = fuzzy_score(val_norm, stext, span)
+                elif method == "tfidf":
+                    s_span = float(np.clip(cosine_similarity(vec.transform([val_norm]), vec.transform([stext]))[0,0], 0, 1))
+                    s_ctx  = float(np.clip(cosine_similarity(vec.transform([val_norm]), vec.transform([ctx]))[0,0],   0, 1)) if ctx else 0.0
+                    s_combo= float(np.clip(cosine_similarity(vec.transform([combo]),   vec.transform([ctx]))[0,0],   0, 1)) if ctx else 0.0
+                    v_toks = val_norm.split()
+                    coverage = 0.0
+                    if v_toks:
+                        covered = 0
+                        s_words = stext.split()
+                        for w in v_toks:
+                            covered += any((_rfuzz.QRatio(w, sw) >= 90) for sw in s_words)
+                        coverage = covered / max(1, len(v_toks))
+                    s = 0.70*s_span + 0.20*max(s_ctx, s_combo) + 0.10*coverage
+                elif method == "minilm":
+                    E = minilm_model.encode([combo, ctx], convert_to_numpy=True, normalize_embeddings=True)
+                    s = float(np.clip(np.dot(E[0], E[1]), 0, 1))
+                else:  # distilbert
+                    with torch.no_grad():
+                        t = distil_local.tok([combo, ctx], padding=True, truncation=True, return_tensors="pt", max_length=256).to(distil_local.device)
+                        out_h = distil_local.mdl(**t).last_hidden_state
+                        mask = t["attention_mask"].unsqueeze(-1)
+                        summed = (out_h * mask).sum(1)
+                        counts = mask.sum(1).clamp(min=1)
+                        emb = torch.nn.functional.normalize(summed / counts, dim=1)
+                        s = float((emb[0] @ emb[1].T).item())
+                # line penalty
+                ys = sorted([(t["y0"]+t["y1"])*0.5 for t in span])
+                spread = (ys[-1]-ys[0]) if len(ys)>1 else 0.0
+                avg_h = np.mean([t["y1"]-t["y0"] for t in span]) if span else 1.0
+                penalty = max(0.0, (spread - 0.6*avg_h)) / max(1.0, avg_h)
+                s = float(max(0.0, s - 0.12*penalty))
+                scored.append({"page": pg, "rect": rect, "score": s})
+        out[method] = pick(scored)
+
+    if lv3 is not None:
+        scored = []
+        for pg, toks in tokens_by_page.items():
+            vec = tfidf_cache[pg]
+            kwords = [w for w in norm(key).split() if len(w)>=2]
+            for span in slide_windows(toks, max_w=max_window):
+                rect = union_rect(span)
+                ctx = context_snippet(toks, span)
+                base = float(np.clip(cosine_similarity(vec.transform([val_norm]), vec.transform([ctx]))[0,0], 0, 1))
+                near = 0
+                x0 = rect["x0"]-80; y0 = rect["y0"]-40; x1 = rect["x1"]+80; y1 = rect["y1"]+40
+                for t in toks:
+                    if t["x1"] < x0 or t["x0"] > x1 or t["y1"] < y0 or t["y0"] > y1: continue
+                    tx = norm(t.get("text") or "")
+                    if any(w in tx for w in kwords): near += 1
+                s = float(min(1.0, base + 0.05*min(near, 6)))
+                scored.append({"page": pg, "rect": rect, "score": s})
+        out["layoutlmv3"] = pick(scored)
+
+    return out
+
+# ---------- HTML helpers ----------
+def b64_png(pil: Image.Image) -> str:
+    buf = io.BytesIO()
+    pil.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+def render_html(out_path: Path, summary, rows, thumbs):
+    css = """
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 16px; }
+    h1 { font-size: 20px; margin: 0 0 12px; }
+    .kpi { display:flex; gap:16px; margin:12px 0 20px; }
+    .kpi .card { border:1px solid #eee; border-radius:10px; padding:10px 12px; box-shadow:0 1px 4px rgba(0,0,0,0.04); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    table { border-collapse: collapse; width: 100%; margin-top:10px; font-size: 13px; }
+    th, td { border-bottom: 1px solid #eee; padding: 6px 8px; vertical-align: top; }
+    th { text-align:left; background:#fafafa; position: sticky; top: 0; z-index: 1; }
+    .ok { color: #0a7d2e; font-weight: 600; }
+    .warn { color: #b35c00; font-weight: 600; }
+    .bad { color: #b00020; font-weight: 600; }
+    .grid { display:grid; gap:12px; grid-template-columns: 320px 1fr; margin: 16px 0 24px; align-items:start;}
+    .thumb { border:1px solid #eee; border-radius:8px; overflow:hidden; }
+    .small { font-size:12px; color:#666; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; background:#f2f2f2; }
+    """
+    html = [f"<html><head><meta charset='utf-8'><title>Validation Report</title><style>{css}</style></head><body>"]
+    html.append("<h1>Validation Report</h1>")
+
+    # KPI summary
+    html.append("<div class='kpi'>")
+    for name, stat in summary.items():
+        html.append(f"<div class='card'><div class='small'>{name}</div><div style='font-size:18px;font-weight:700'>{stat}</div></div>")
+    html.append("</div>")
+
+    # Per-document sections
+    rows_by_doc = {}
+    for r in rows:
+        rows_by_doc.setdefault(r["doc_path"], []).append(r)
+
+    for doc, items in rows_by_doc.items():
+        html.append("<hr/>")
+        html.append(f"<div class='grid'><div>")
+        # left thumb
+        thumb = thumbs.get(doc)
+        if thumb: html.append(f"<div class='thumb'><img src='{thumb}' style='width:100%;display:block'/></div>")
+        html.append(f"<div class='small mono' style='margin-top:6px'>{doc}</div>")
+        html.append("</div><div>")
+
+        # table
+        html.append("<table>")
+        html.append("<thead><tr><th>Key</th><th>LLM Value</th><th>Method</th><th>Score</th><th>Text (tokens)</th><th>Crop OCR</th><th>Text Sim</th><th>Numeric Sim</th><th>IoU</th></tr></thead><tbody>")
+        for r in items:
+            c_txt = "ok" if r["text_sim"] >= 0.90 else ("warn" if r["text_sim"] >= 0.75 else "bad")
+            c_num = "ok" if r["num_sim"] >= 0.98 else ("warn" if r["num_sim"] >= 0.90 else "bad")
+            c_iou = "ok" if (r["iou"] or 0) >= 0.5 else ("warn" if (r["iou"] or 0) >= 0.3 else "bad")
+            iou_disp = f"{r['iou']:.2f}" if r["iou"] is not None else "—"
+            html.append(
+                "<tr>" +
+                f"<td class='mono'>{r['key']}</td>" +
+                f"<td>{r['gt_value']}</td>" +
+                f"<td><span class='pill'>{r['method']}</span></td>" +
+                f"<td>{'' if r['score'] is None else f'{r['score']:.3f}'}</td>" +
+                f"<td class='mono'>{r['text_pred']}</td>" +
+                f"<td class='mono'>{r['text_ocr']}</td>" +
+                f"<td class='{c_txt}'>{r['text_sim']:.2f}</td>" +
+                f"<td class='{c_num}'>{r['num_sim']:.2f}</td>" +
+                f"<td class='{c_iou}'>{iou_disp}</td>" +
+                "</tr>"
+            )
+        html.append("</tbody></table>")
+        html.append("</div></div>")  # end grid
+
+    html.append("</body></html>")
+    out_path.write_text("\n".join(html), encoding="utf-8")
+    print(f"[ok] Wrote HTML -> {out_path}")
+
+# ---------- Main ----------
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("root", type=Path, help="Root folder with PDFs + OCR artifacts + extraction JSON")
+    ap.add_argument("--models_root", type=Path, default=Path("src/models"))
+    ap.add_argument("--out", type=Path, default=Path("validation_report.html"))
+    ap.add_argument("--max_window", type=int, default=12)
+    ap.add_argument("--dpi", type=int, default=260, help="Raster DPI for crop OCR")
+    ap.add_argument("--lang", type=str, default="eng")
+    ap.add_argument("--first_page_thumb", action="store_true", help="Render first page thumbnails")
+    args = ap.parse_args()
+
+    # Load optional local models
+    minilm = load_minilm(args.models_root)
+    distil = load_distilbert(args.models_root)
+    lv3    = load_layoutlmv3(args.models_root)
+
+    # Gather PDFs
+    pdfs = [p for p in args.root.rglob("*.pdf") if p.is_file()]
+    print(f"Found {len(pdfs)} PDFs under {args.root}")
+
+    rows = []
+    thumbs = {}
+
+    for pdf in pdfs:
+        stem = pdf.with_suffix("")
+        meta_p = stem.with_suffix(".meta.json")
+        boxes_p = stem.with_suffix(".boxes.json")
+        if not (meta_p.exists() and boxes_p.exists()):
+            print(f"[skip] Missing OCR artifacts for {pdf.name}")
+            continue
+
+        fields = load_extraction(stem)
+        if not fields:
+            print(f"[warn] No extraction JSON (or no fields) for {pdf.name}")
+            continue
+
+        meta, tokens_by_page = load_tokens(meta_p, boxes_p)
+
+        # per-page TF-IDF caches
+        tfidf_cache = {}
+        for pg, toks in tokens_by_page.items():
+            txt = " ".join((t.get("text") or "").strip() for t in toks)
+            tfidf_cache[pg] = tfidf_fit(txt)
+
+        for key, value, gt_rects in fields:
+            hits = best_boxes(tokens_by_page, key, value, args.max_window, minilm, distil, lv3, tfidf_cache)
+
+            for method, hit in hits.items():
+                page = hit["page"] if hit else None
+                rect = hit["rect"] if hit else None
+                score = hit["score"] if hit else None
+
+                pred_text = ""
+                crop_text = ""
+                iou_best = None
+
+                if hit and page in tokens_by_page and rect:
+                    pred_text = text_from_rect(tokens_by_page[page], rect)
+                    crop_text = norm(crop_ocr(pdf, page, rect, dpi=args.dpi, lang=args.lang))
+                    if gt_rects:
+                        cands = [g for g in gt_rects if int(g.get("page",-1)) == page] or gt_rects
+                        iou_best = max((iou(rect, g) for g in cands), default=0.0)
+
+                # compare against LLM value (normalized)
+                n_val = norm(value)
+                text_sim = qratio(n_val, pred_text or crop_text)  # take better of the two in display?
+                # show both, but score by the better:
+                text_sim = max(qratio(n_val, pred_text), qratio(n_val, crop_text)) if (pred_text or crop_text) else 0.0
+                num_sim = max(qratio(norm_num(value), norm_num(pred_text)), qratio(norm_num(value), norm_num(crop_text))) if (pred_text or crop_text) else 0.0
+
+                rows.append({
+                    "doc_path": str(pdf),
+                    "key": key,
+                    "gt_value": value,
+                    "method": method,
+                    "score": score,
+                    "text_pred": pred_text,
+                    "text_ocr": crop_text,
+                    "text_sim": round(text_sim, 3),
+                    "num_sim": round(num_sim, 3),
+                    "iou": round(iou_best, 3) if iou_best is not None else None,
+                })
+
+        # optional thumb (first page)
+        if args.first_page_thumb:
+            try:
+                import pypdfium2 as pdfium
+                page1 = pdfium.PdfDocument(str(pdf))[0].render(scale=(180/72)).to_pil()
+                thumb_png = b64_png(page1)
+                thumbs[str(pdf)] = thumb_png
+            except Exception:
+                pass
+
+    # KPIs
+    def pct(n, d): return f"{(100.0*n/d):.1f}%" if d else "—"
+    by_method = {}
+    for r in rows:
+        by_method.setdefault(r["method"], []).append(r)
+    kpis = {}
+    total_fields = len({(r["doc_path"], r["key"]) for r in rows})
+    kpis["Docs"] = len(set(r["doc_path"] for r in rows))
+    kpis["Fields"] = total_fields
+    for m, arr in by_method.items():
+        # text pass ≥0.90
+        pass_text = sum(1 for x in arr if x["text_sim"] >= 0.90)
+        pass_num  = sum(1 for x in arr if x["num_sim"]  >= 0.98)
+        pass_iou  = sum(1 for x in arr if (x["iou"] or 0) >= 0.5)
+        kpis[f"{m} · text≥0.90"] = pct(pass_text, len(arr))
+        kpis[f"{m} · num≥0.98"]  = pct(pass_num,  len(arr))
+        have_iou = sum(1 for x in arr if x["iou"] is not None)
+        kpis[f"{m} · IoU≥0.5"]   = pct(pass_iou,  have_iou) if have_iou else "—"
+
+    render_html(args.out, kpis, rows, thumbs)
+
+if __name__ == "__main__":
+    main()
