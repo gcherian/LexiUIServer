@@ -1,25 +1,13 @@
 #!/usr/bin/env python3
-# validate_portal.py
-# Build an interactive HTML validation portal:
-# - Left: document list
-# - Right: global summary (when none selected), or per-document viewer with
-#          page thumbnail and 5 overlaid boxes (autolocate, tfidf, minilm, distilbert, layoutlmv3)
-# Notes:
-#   * Local-only; loads optional models from --models_root
-#   * Uses tokens (boxes.json) AND a second crop OCR pass for the selected rect
-#   * Robust to missing models/fields; will still render summaries
-#
-# Usage:
-#   python validate_portal.py ROOT --models_root src/models --out report.html --first_page_thumbs
-#
+# validate_portal.py  — self-contained validation portal with OCR fallback
 from __future__ import annotations
-import argparse, json, io, base64
+import argparse, json, io, base64, time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
+
 import numpy as np
 from PIL import Image, ImageOps
-
 from rapidfuzz import fuzz as _rfuzz
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -37,7 +25,7 @@ try:
 except Exception:
     SentenceTransformer = None
 
-# -------------------- utils --------------------
+# -------------------- basic utils --------------------
 def norm(s: str) -> str:
     return " ".join((s or "").strip().lower().replace("\u00A0"," ").split())
 
@@ -119,6 +107,58 @@ def b64_png(pil: Image.Image) -> str:
     buf = io.BytesIO()
     pil.save(buf, format="PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+# -------------------- OCR fallback --------------------
+def ensure_ocr_for_pdf(pdf_path: Path, dpi=260, lang="eng") -> Tuple[Path, Path, Path]:
+    """
+    Ensure <stem>.meta.json, <stem>.boxes.json, <stem>.pages.txt exist.
+    If missing, run OCR locally and write them, plus <stem>.ocr marker.
+    Returns (meta_path, boxes_path, pages_path).
+    """
+    import pypdfium2 as pdfium
+    import pytesseract
+
+    stem = pdf_path.with_suffix("")
+    meta_p  = stem.with_suffix(".meta.json")
+    boxes_p = stem.with_suffix(".boxes.json")
+    pages_p = stem.with_suffix(".pages.txt")
+    marker  = stem.with_suffix(".ocr")
+
+    if meta_p.exists() and boxes_p.exists():
+        return meta_p, boxes_p, pages_p
+
+    pdf = pdfium.PdfDocument(str(pdf_path))
+    all_boxes: List[Dict[str,Any]] = []
+    pages_meta: List[Dict[str,float]] = []
+    all_page_texts: List[str] = []
+
+    for i in range(len(pdf)):
+        page_no = i + 1
+        pil = pdf[i].render(scale=(dpi/72)).to_pil()
+        gray = ImageOps.autocontrast(pil.convert("L"))
+        cfg = f"--oem 1 --psm 6"  # token-level boxes
+        d = pytesseract.image_to_data(gray, lang=lang, config=cfg, output_type=pytesseract.Output.DICT)
+        tokens_this_page: List[str] = []
+        for j in range(len(d["text"])):
+            txt = (d["text"][j] or "").strip()
+            if not txt: continue
+            x, y, w, h = d["left"][j], d["top"][j], d["width"][j], d["height"][j]
+            all_boxes.append({"page":page_no,"x0":float(x),"y0":float(y),"x1":float(x+w),"y1":float(y+h),"text":txt})
+            tokens_this_page.append(txt)
+        pages_meta.append({"page":page_no,"width":float(gray.width),"height":float(gray.height)})
+        all_page_texts.append(" ".join(tokens_this_page))
+
+    meta_p.write_text(json.dumps({
+        "pages": pages_meta,
+        "params": {"dpi": dpi, "psm": 6, "oem": 1, "lang": lang},
+        "coord_space": {"origin": "top-left", "units": "px@dpi", "dpi": dpi}
+    }, indent=2), encoding="utf-8")
+    boxes_p.write_text(json.dumps(all_boxes), encoding="utf-8")
+    pages_p.write_text("\n\n".join(all_page_texts), encoding="utf-8")
+    marker.write_text(json.dumps({"ts": int(time.time()), "dpi": dpi, "lang": lang}), encoding="utf-8")
+
+    print(f"[ocr] wrote {meta_p.name}, {boxes_p.name}, {pages_p.name}, {marker.name}")
+    return meta_p, boxes_p, pages_p
 
 # -------------------- model loading --------------------
 @dataclass
@@ -331,8 +371,8 @@ def best_boxes(tokens_by_page, key, value, max_window, minilm_model, distil_loca
 
     return out
 
-# -------------------- HTML builder --------------------
-CSS = """
+# -------------------- HTML (unchanged UI) --------------------
+CSS = """/* (same CSS as before) */ 
 body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
 .app { display:grid; grid-template-columns: 320px 1fr; height: 100vh; }
 .left { border-right: 1px solid #eee; overflow:auto; }
@@ -363,244 +403,96 @@ select, button { padding:6px 8px; border:1px solid #ddd; border-radius:6px; back
 .bad { color:#b00020; font-weight:600; }
 """
 
-JS = """
-const COLORS = {
-  autolocate: '#ec4899',   // pink
-  tfidf:      '#f59e0b',   // amber
-  minilm:     '#10b981',   // emerald
-  distilbert: '#3b82f6',   // blue
-  layoutlmv3: '#a855f7'    // purple
-};
-let DATA = null; // injected JSON
-let STATE = { docIdx: -1, fieldIdx: -1 };
-
-function pct(n, d){ return d ? (100*n/d).toFixed(1)+'%' : '—'; }
-
-function init(){
-  DATA = window.__DATA__;
-  renderDocList();
-  renderSummary();
-}
-
+JS = """/* (same JS as before) */ 
+const COLORS = { autolocate:'#ec4899', tfidf:'#f59e0b', minilm:'#10b981', distilbert:'#3b82f6', layoutlmv3:'#a855f7' };
+let DATA = null; let STATE = { docIdx: -1, fieldIdx: -1 };
+function pct(n,d){ return d ? (100*n/d).toFixed(1)+'%' : '—'; }
+function init(){ DATA = window.__DATA__; renderDocList(); renderSummary(); }
 function renderDocList(){
-  const left = document.getElementById('left');
-  left.innerHTML = '';
-  const hdr = document.createElement('div');
-  hdr.className='header';
-  hdr.textContent='Documents';
-  left.appendChild(hdr);
-
-  DATA.docs.forEach((d,i)=>{
-    const div = document.createElement('div');
-    div.className='doc';
-    div.onclick = () => { STATE.docIdx = i; STATE.fieldIdx = -1; renderDoc(); };
-    const name = document.createElement('div');
-    name.className='name'; name.textContent = d.name;
-    const mini = document.createElement('div');
-    mini.className='mini';
-    const totals = d.stats;
-    for (const k of Object.keys(totals)){
-      const pill = document.createElement('span');
-      pill.className='pill';
-      pill.textContent = `${k}: ${totals[k]}`;
-      mini.appendChild(pill);
-    }
-    div.appendChild(name); div.appendChild(mini);
-    left.appendChild(div);
-  });
+  const left = document.getElementById('left'); left.innerHTML=''; 
+  const hdr=document.createElement('div'); hdr.className='header'; hdr.textContent='Documents'; left.appendChild(hdr);
+  DATA.docs.forEach((d,i)=>{ const div=document.createElement('div'); div.className='doc'; div.onclick=()=>{STATE.docIdx=i;STATE.fieldIdx=-1;renderDoc();};
+    const name=document.createElement('div'); name.className='name'; name.textContent=d.name;
+    const mini=document.createElement('div'); mini.className='mini';
+    for (const k of Object.keys(d.stats)){ const pill=document.createElement('span'); pill.className='pill'; pill.textContent=`${k}: ${d.stats[k]}`; mini.appendChild(pill); }
+    div.appendChild(name); div.appendChild(mini); left.appendChild(div); });
 }
-
 function renderSummary(){
-  const right = document.getElementById('right');
-  right.innerHTML = '';
-  const title = document.createElement('div');
-  title.className='header';
-  title.textContent='Summary';
-  right.appendChild(title);
-
-  // KPIs
-  const kpi = document.createElement('div'); kpi.className='kpi';
-  for (const [k,v] of Object.entries(DATA.global.kpi)){
-    const c = document.createElement('div'); c.className='card';
-    const t = document.createElement('div'); t.className='small'; t.textContent=k;
-    const n = document.createElement('div'); n.style.fontSize='18px'; n.style.fontWeight='700'; n.textContent=v;
-    c.appendChild(t); c.appendChild(n); kpi.appendChild(c);
-  }
+  const right=document.getElementById('right'); right.innerHTML=''; const title=document.createElement('div'); title.className='header'; title.textContent='Summary'; right.appendChild(title);
+  const kpi=document.createElement('div'); kpi.className='kpi';
+  for (const [k,v] of Object.entries(DATA.global.kpi)){ const c=document.createElement('div'); c.className='card';
+    const t=document.createElement('div'); t.className='small'; t.textContent=k;
+    const n=document.createElement('div'); n.style.fontSize='18px'; n.style.fontWeight='700'; n.textContent=v; c.appendChild(t); c.appendChild(n); kpi.appendChild(c); }
   right.appendChild(kpi);
-
-  // Per-method table
-  const tbl = document.createElement('table');
-  tbl.innerHTML = `
-    <thead><tr>
-      <th>Method</th><th>Text ≥ 0.90</th><th>Numeric ≥ 0.98</th><th>IoU ≥ 0.5</th><th>Count</th>
-    </tr></thead><tbody></tbody>`;
-  const tb = tbl.querySelector('tbody');
-  for (const m of DATA.global.methods){
-    const r = DATA.global.by_method[m] || {text:0,num:0,iou:0,count:0};
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td><span class="pill" style="background:#f6f6f6;border-left:6px solid ${COLORS[m]};padding-left:6px">${m}</span></td>
-      <td>${pct(r.text, r.count)}</td>
-      <td>${pct(r.num,  r.count)}</td>
-      <td>${r.iou_den ? pct(r.iou, r.iou_den) : '—'}</td>
-      <td>${r.count}</td>`;
-    tb.appendChild(tr);
-  }
+  const tbl=document.createElement('table'); tbl.innerHTML=`<thead><tr><th>Method</th><th>Text ≥ 0.90</th><th>Numeric ≥ 0.98</th><th>IoU ≥ 0.5</th><th>Count</th></tr></thead><tbody></tbody>`;
+  const tb=tbl.querySelector('tbody');
+  for (const m of DATA.global.methods){ const r=DATA.global.by_method[m]||{text:0,num:0,iou:0,iou_den:0,count:0};
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td><span class="pill" style="background:#f6f6f6;border-left:6px solid ${COLORS[m]};padding-left:6px">${m}</span></td>
+      <td>${pct(r.text,r.count)}</td><td>${pct(r.num,r.count)}</td><td>${r.iou_den?pct(r.iou,r.iou_den):'—'}</td><td>${r.count}</td>`;
+    tb.appendChild(tr); }
   right.appendChild(tbl);
 }
-
 function renderDoc(){
-  const d = DATA.docs[STATE.docIdx];
-  const right = document.getElementById('right');
-  right.innerHTML = '';
-
-  const title = document.createElement('div');
-  title.className='header';
-  title.textContent = d.name;
-  right.appendChild(title);
-
-  // Top bar: field selector + legend
-  const top = document.createElement('div'); top.className='topbar';
-  const sel = document.createElement('select');
-  sel.onchange = () => { STATE.fieldIdx = parseInt(sel.value,10); drawField(); };
-  d.fields.forEach((f,idx)=>{
-    const opt = document.createElement('option');
-    opt.value = idx; opt.textContent = f.key;
-    sel.appendChild(opt);
-  });
-  if (STATE.fieldIdx < 0) STATE.fieldIdx = 0;
-  sel.value = String(STATE.fieldIdx);
-  top.appendChild(sel);
-
-  const legend = document.createElement('div'); legend.className='legend';
-  for (const [m,color] of Object.entries(COLORS)){
-    const sw = document.createElement('span'); sw.className='sw'; sw.style.background=color;
-    const lab = document.createElement('span'); lab.className='small'; lab.textContent=m;
-    legend.appendChild(sw); legend.appendChild(lab);
-  }
-  top.appendChild(legend);
-  right.appendChild(top);
-
-  // Grid view: left = thumb canvas; right = table
-  const grid = document.createElement('div'); grid.className='grid';
-  // left
-  const leftBox = document.createElement('div');
-  const thumbWrap = document.createElement('div'); thumbWrap.className='thumb';
-  const img = document.createElement('img'); img.id='pageImg';
-  thumbWrap.appendChild(img);
-  const overlay = document.createElement('canvas'); overlay.id='ov'; overlay.className='canvas';
-  thumbWrap.appendChild(overlay);
-  leftBox.appendChild(thumbWrap);
-  right.appendChild(grid);
-  grid.appendChild(leftBox);
-
-  // right table
-  const tbl = document.createElement('table'); tbl.id='detailTable';
-  tbl.innerHTML = `
-    <thead><tr>
-      <th>Method</th><th>Score</th><th>Text (tokens)</th><th>Crop OCR</th><th>Text Sim</th><th>Numeric Sim</th><th>IoU</th>
-    </tr></thead><tbody></tbody>`;
+  const d=DATA.docs[STATE.docIdx]; const right=document.getElementById('right'); right.innerHTML='';
+  const title=document.createElement('div'); title.className='header'; title.textContent=d.name; right.appendChild(title);
+  const top=document.createElement('div'); top.className='topbar';
+  const sel=document.createElement('select'); sel.onchange=()=>{STATE.fieldIdx=parseInt(sel.value,10); drawField();};
+  d.fields.forEach((f,idx)=>{ const opt=document.createElement('option'); opt.value=idx; opt.textContent=f.key; sel.appendChild(opt);});
+  if (STATE.fieldIdx<0) STATE.fieldIdx=0; sel.value=String(STATE.fieldIdx); top.appendChild(sel);
+  const legend=document.createElement('div'); legend.className='legend';
+  for (const [m,color] of Object.entries(COLORS)){ const sw=document.createElement('span'); sw.className='sw'; sw.style.background=color;
+    const lab=document.createElement('span'); lab.className='small'; lab.textContent=m; legend.appendChild(sw); legend.appendChild(lab);}
+  top.appendChild(legend); right.appendChild(top);
+  const grid=document.createElement('div'); grid.className='grid'; const leftBox=document.createElement('div');
+  const thumbWrap=document.createElement('div'); thumbWrap.className='thumb';
+  const img=document.createElement('img'); img.id='pageImg'; thumbWrap.appendChild(img);
+  const overlay=document.createElement('canvas'); overlay.id='ov'; overlay.className='canvas'; thumbWrap.appendChild(overlay);
+  leftBox.appendChild(thumbWrap); right.appendChild(grid); grid.appendChild(leftBox);
+  const tbl=document.createElement('table'); tbl.id='detailTable';
+  tbl.innerHTML=`<thead><tr><th>Method</th><th>Score</th><th>Text (tokens)</th><th>Crop OCR</th><th>Text Sim</th><th>Numeric Sim</th><th>IoU</th></tr></thead><tbody></tbody>`;
   grid.appendChild(tbl);
-
-  // preload page thumbs (data URLs)
-  window.__pageThumbs = d.page_thumbs;
-  window.__doc = d;
-  drawField();
+  window.__pageThumbs=d.page_thumbs; window.__doc=d; drawField();
 }
-
 function drawField(){
-  const d = window.__doc;
-  const f = d.fields[STATE.fieldIdx];
-  const methods = ['autolocate','tfidf','minilm','distilbert','layoutlmv3'];
-
-  // pick a page to show: use the most common predicted page across methods, or first non-null
-  const pages = methods.map(m=> (f[m] && f[m].page!=null) ? f[m].page : null).filter(x=>x!=null);
-  if (pages.length===0){
-    // show page 1 if none
-    pages.push(1);
-  }
-  const page = pages.sort((a,b)=> pages.filter(v=>v===a).length - pages.filter(v=>v===b).length).pop();
-
-  // set image
-  const img = document.getElementById('pageImg');
-  const ov  = document.getElementById('ov');
-  const thumb = window.__pageThumbs[String(page)] || window.__pageThumbs['1'];
-  img.src = thumb || '';
-  img.onload = () => {
-    ov.width = img.clientWidth;
-    ov.height= img.clientHeight;
-    const ctx = ov.getContext('2d');
-    ctx.clearRect(0,0,ov.width,ov.height);
-
-    // draw all boxes that belong to this page
-    methods.forEach(m=>{
-      const h = f[m];
-      if (!h || h.page!==page || !h.rect) return;
-      const r = h.rect;
-      // scale from server space to displayed image
-      const sw = img.naturalWidth ? (img.clientWidth / img.naturalWidth) : (ov.width / d.meta[page].w);
-      const sh = img.naturalHeight? (img.clientHeight/ img.naturalHeight): (ov.height/ d.meta[page].h);
-      const x0 = Math.min(r.x0,r.x1)*sw, y0 = Math.min(r.y0,r.y1)*sh;
-      const x1 = Math.max(r.x0,r.x1)*sw, y1 = Math.max(r.y0,r.y1)*sh;
-      ctx.strokeStyle = COLORS[m]; ctx.lineWidth = 2;
-      ctx.fillStyle = COLORS[m] + '33';
-      ctx.beginPath(); ctx.rect(x0,y0,x1-x0,y1-y0); ctx.fill(); ctx.stroke();
-      // label
-      ctx.fillStyle = COLORS[m]; ctx.font = '12px ui-sans-serif';
-      ctx.fillRect(x0, Math.max(0,y0-16), 8, 16);
-      ctx.fillStyle = '#000'; ctx.fillText(m, x0+12, Math.max(12,y0-4));
-    });
-
-    // fill table
-    const tb = document.querySelector('#detailTable tbody');
-    tb.innerHTML = '';
-    methods.forEach(m=>{
-      const h = f[m] || {};
-      const tr = document.createElement('tr');
-      const iou = h.iou==null ? '—' : h.iou.toFixed(2);
-      const ts  = h.text_sim==null ? '—' : h.text_sim.toFixed(2);
-      const ns  = h.num_sim==null ? '—' : h.num_sim.toFixed(2);
-      tr.innerHTML = `
-        <td><span class="pill" style="background:#f6f6f6;border-left:6px solid ${COLORS[m]};padding-left:6px">${m}</span></td>
+  const d=window.__doc; const f=d.fields[STATE.fieldIdx]; const methods=['autolocate','tfidf','minilm','distilbert','layoutlmv3'];
+  const pages=methods.map(m=>(f[m]&&f[m].page!=null)?f[m].page:null).filter(x=>x!=null); if (pages.length===0) pages.push(1);
+  const page=pages.sort((a,b)=> pages.filter(v=>v===a).length - pages.filter(v=>v===b).length).pop();
+  const img=document.getElementById('pageImg'); const ov=document.getElementById('ov');
+  const thumb=window.__pageThumbs[String(page)] || window.__pageThumbs['1']; img.src=thumb||'';
+  img.onload=()=>{ ov.width=img.clientWidth; ov.height=img.clientHeight; const ctx=ov.getContext('2d'); ctx.clearRect(0,0,ov.width,ov.height);
+    methods.forEach(m=>{ const h=f[m]; if (!h || h.page!==page || !h.rect) return; const r=h.rect;
+      const sw=ov.width / d.meta[String(page)].w; const sh=ov.height / d.meta[String(page)].h;
+      const x0=Math.min(r.x0,r.x1)*sw, y0=Math.min(r.y0,r.y1)*sh, x1=Math.max(r.x0,r.x1)*sw, y1=Math.max(r.y0,r.y1)*sh;
+      ctx.strokeStyle=COLORS[m]; ctx.lineWidth=2; ctx.fillStyle=COLORS[m]+'33'; ctx.beginPath(); ctx.rect(x0,y0,x1-x0,y1-y0); ctx.fill(); ctx.stroke();
+      ctx.fillStyle=COLORS[m]; ctx.font='12px ui-sans-serif'; ctx.fillRect(x0, Math.max(0,y0-16), 8, 16);
+      ctx.fillStyle='#000'; ctx.fillText(m, x0+12, Math.max(12,y0-4)); });
+    const tb=document.querySelector('#detailTable tbody'); tb.innerHTML='';
+    methods.forEach(m=>{ const h=f[m]||{}; const iou=(h.iou==null)?'—':h.iou.toFixed(2); const ts=(h.text_sim==null)?'—':h.text_sim.toFixed(2); const ns=(h.num_sim==null)?'—':h.num_sim.toFixed(2);
+      const tr=document.createElement('tr');
+      tr.innerHTML=`<td><span class="pill" style="background:#f6f6f6;border-left:6px solid ${COLORS[m]};padding-left:6px">${m}</span></td>
         <td>${h.score==null?'':h.score.toFixed(3)}</td>
         <td class="mono">${(h.text_pred||'')}</td>
         <td class="mono">${(h.text_ocr||'')}</td>
         <td class="${h.text_sim>=0.90?'ok':(h.text_sim>=0.75?'warn':'bad')}">${ts}</td>
         <td class="${h.num_sim>=0.98?'ok':(h.num_sim>=0.90?'warn':'bad')}">${ns}</td>
         <td class="${(h.iou||0)>=0.5?'ok':((h.iou||0)>=0.3?'warn':'bad')}">${iou}</td>`;
-      tb.appendChild(tr);
-    });
-  };
+      tb.appendChild(tr); }); };
 }
-
 window.addEventListener('DOMContentLoaded', init);
 """
 
 def render_html(out_path: Path, payload: dict):
     html = f"""<!doctype html>
-<html>
-<head>
-<meta charset="utf-8"/>
-<title>Validation Portal</title>
-<style>{CSS}</style>
-</head>
-<body>
-<div class="app">
-  <div id="left" class="left"></div>
-  <div id="right" class="right"></div>
-</div>
-<script>
-window.__DATA__ = {json.dumps(payload)};
-{JS}
-</script>
-</body>
-</html>"""
+<html><head><meta charset="utf-8"/><title>Validation Portal</title><style>{CSS}</style></head>
+<body><div class="app"><div id="left" class="left"></div><div id="right" class="right"></div></div>
+<script>window.__DATA__ = {json.dumps(payload)}; {JS}</script></body></html>"""
     out_path.write_text(html, encoding="utf-8")
     print(f"[ok] wrote {out_path}")
 
-# -------------------- main pipeline --------------------
+# -------------------- pipeline --------------------
 def build_portal(root: Path, models_root: Path, out: Path, max_window: int, dpi: int, lang: str, thumbs: bool):
-    # load optional models
+    # models
     minilm = load_minilm(models_root)
     distil = load_distilbert(models_root)
     lv3    = load_layoutlmv3(models_root)
@@ -612,17 +504,12 @@ def build_portal(root: Path, models_root: Path, out: Path, max_window: int, dpi:
     global_rows = []
 
     for pdf in pdfs:
-        stem = pdf.with_suffix("")
-        meta_p  = stem.with_suffix(".meta.json")
-        boxes_p = stem.with_suffix(".boxes.json")
-        if not (meta_p.exists() and boxes_p.exists()):
-            print(f"[skip] OCR artifacts missing for {pdf.name}")
-            continue
+        # Ensure OCR artifacts exist (auto-OCR if missing)
+        meta_p, boxes_p, _pages_p = ensure_ocr_for_pdf(pdf, dpi=dpi, lang=lang)
 
-        fields = load_extraction(stem)
+        fields = load_extraction(pdf.with_suffix(""))
         if not fields:
-            print(f"[warn] No extraction JSON / no fields for {pdf.name}")
-            # still show doc with basic stats
+            # still render minimal doc card
             meta, tokens_by_page = load_tokens(meta_p, boxes_p)
             page_thumbs = {}
             if thumbs:
@@ -644,12 +531,14 @@ def build_portal(root: Path, models_root: Path, out: Path, max_window: int, dpi:
             continue
 
         meta, tokens_by_page = load_tokens(meta_p, boxes_p)
+
+        # per-page TF-IDF
         tfidf_cache = {}
         for pg, toks in tokens_by_page.items():
             txt = " ".join((t.get("text") or "").strip() for t in toks)
             tfidf_cache[pg] = tfidf_fit(txt)
 
-        # thumbnails per page
+        # thumbs
         page_thumbs = {}
         if thumbs:
             try:
@@ -666,7 +555,6 @@ def build_portal(root: Path, models_root: Path, out: Path, max_window: int, dpi:
 
         for key, value, gt_rects in fields:
             hits = best_boxes(tokens_by_page, key, value, max_window, minilm, distil, lv3, tfidf_cache)
-
             row = {"key": key, "gt_value": value}
             for method in ["autolocate","tfidf","minilm","distilbert","layoutlmv3"]:
                 hit = hits.get(method)
@@ -698,13 +586,11 @@ def build_portal(root: Path, models_root: Path, out: Path, max_window: int, dpi:
                 row[method] = rec
             field_payloads.append(row)
 
-        # compress stats for left panel
+        # left-card stats
         stats = {}
-        total_fields = max(1, len(field_payloads))
-        for m, c in per_method_counters.items():
-            txt = f"{int(100*(c['text']/c['count'])) if c['count'] else 0}% txt"
-            stats[m] = txt
         stats["fields"] = str(len(field_payloads))
+        for m, c in per_method_counters.items():
+            stats[m] = f"{int(100*(c['text']/c['count'])) if c['count'] else 0}% txt"
 
         docs_payload.append({
             "name": str(pdf.relative_to(root)),
@@ -714,7 +600,6 @@ def build_portal(root: Path, models_root: Path, out: Path, max_window: int, dpi:
             "stats": stats
         })
 
-        # push into global aggregation
         for f in field_payloads:
             for m in ["autolocate","tfidf","minilm","distilbert","layoutlmv3"]:
                 h = f.get(m)
@@ -722,7 +607,7 @@ def build_portal(root: Path, models_root: Path, out: Path, max_window: int, dpi:
                 global_rows.append({"method": m, "text_sim": h.get("text_sim") or 0.0,
                                     "num_sim": h.get("num_sim") or 0.0, "iou": h.get("iou")})
 
-    # Build global KPIs
+    # global KPIs
     by_m = {m: {"text":0,"num":0,"iou":0,"iou_den":0,"count":0} for m in ["autolocate","tfidf","minilm","distilbert","layoutlmv3"]}
     for r in global_rows:
         m = r["method"]; by_m[m]["count"] += 1
@@ -751,13 +636,13 @@ def build_portal(root: Path, models_root: Path, out: Path, max_window: int, dpi:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("root", type=Path, help="Root folder with PDFs + *.meta.json + *.boxes.json + *.json (LLM)")
+    ap.add_argument("root", type=Path, help="Root folder with PDFs + (optional) *.meta.json + *.boxes.json + *.json")
     ap.add_argument("--models_root", type=Path, default=Path("src/models"))
     ap.add_argument("--out", type=Path, default=Path("validation_portal.html"))
     ap.add_argument("--max_window", type=int, default=12)
     ap.add_argument("--dpi", type=int, default=260)
     ap.add_argument("--lang", type=str, default="eng")
-    ap.add_argument("--first_page_thumbs", action="store_true", help="Also render thumbs for all pages (small)")
+    ap.add_argument("--first_page_thumbs", action="store_true")
     args = ap.parse_args()
     build_portal(args.root, args.models_root, args.out, args.max_window, args.dpi, args.lang, args.first_page_thumbs)
 
