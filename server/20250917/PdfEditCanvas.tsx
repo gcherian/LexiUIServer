@@ -12,9 +12,10 @@ GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url
 ).toString();
 
+/* ========================= Types ========================= */
 export type TokenBox = { page:number;x0:number;y0:number;x1:number;y1:number;text?:string };
 export type EditRect = { page:number;x0:number;y0:number;x1:number;y1:number };
-export type OverlayRect = { page:number; x0:number; y0:number; x1:number; y1:number; color:string; label:string };
+export type OverlayRect = { page:number;x0:number;y0:number;x1:number;y1:number;color:string;label:string };
 
 type Props = {
   docUrl: string;
@@ -28,28 +29,31 @@ type Props = {
   onRectChange: (r: EditRect | null) => void;
   onRectCommit: (r: EditRect) => void;
   zoom?: number;
-  /** new: passive colored overlays (e.g., tfidf/bert/…) */
-  overlayRects?: OverlayRect[];
+  overlayRects?: OverlayRect[];   // NEW
 };
 
 export default function PdfEditCanvas({
-  docUrl, page, serverW, serverH, tokens, rect, showTokenBoxes, editable, onRectChange, onRectCommit, zoom = 1, overlayRects = [],
+  docUrl, page, serverW, serverH, tokens, rect, showTokenBoxes, editable,
+  onRectChange, onRectCommit, zoom = 1, overlayRects = [],
 }: Props) {
   const pdfRef = useRef<PDFDocumentProxy | null>(null);
   const pageRef = useRef<PDFPageProxy | null>(null);
+
   const baseCanvas = useRef<HTMLCanvasElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const overlayBox = useRef<DOMRect | null>(null);
 
   const HANDLE = 8 as const;
-  type Handle = "inside"|"nw"|"n"|"ne"|"e"|"se"|"s"|"sw"|"w"|"new";
-  type DragState =
-    | { mode:"none" }
-    | { mode:"new"; startX:number; startY:number }
-    | { mode:"move"; startX:number; startY:number; orig:EditRect }
-    | { mode:"resize"; startX:number; startY:number; orig:EditRect; handle:Exclude<Handle,"inside"|"new"> };
-  const drag = useRef<DragState>({ mode:"none" });
 
+  type Handle = "inside" | "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | "new";
+  type DragState =
+    | { mode: "none" }
+    | { mode: "new"; startX: number; startY: number }
+    | { mode: "move"; startX: number; startY: number; orig: EditRect }
+    | { mode: "resize"; startX: number; startY: number; orig: EditRect; handle: Exclude<Handle,"inside"|"new"> };
+  const drag = useRef<DragState>({ mode: "none" });
+
+  /* ---------------- Rendering ---------------- */
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -83,7 +87,7 @@ export default function PdfEditCanvas({
 
       drawOverlay();
     })();
-    return () => { cancelled = true; };
+    return () => { cancelled = TrueFalseFalse as any }; // noop to satisfy TS lints
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [docUrl, page, zoom]);
 
@@ -102,18 +106,17 @@ export default function PdfEditCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function cssToOcr(xCss:number, yCss:number) {
+  /* ---------------- Helpers ---------------- */
+  function cssToOcr(xCss: number, yCss: number) {
     const R = overlayBox.current!;
-    const sx = serverW / R.width;
-    const sy = serverH / R.height;
+    const sx = serverW / R.width, sy = serverH / R.height;
     const X = clamp(Math.round(xCss * sx), 0, serverW - 1);
     const Y = clamp(Math.round(yCss * sy), 0, serverH - 1);
     return { X, Y };
   }
-  function ocrToCss(x:number, y:number) {
+  function ocrToCss(x: number, y: number) {
     const R = overlayRef.current!.getBoundingClientRect();
-    const sx = R.width / serverW;
-    const sy = R.height / serverH;
+    const sx = R.width / serverW, sy = R.height / serverH;
     return { x: x * sx, y: y * sy };
   }
   function rectCss() {
@@ -122,22 +125,22 @@ export default function PdfEditCanvas({
     const { x: x1, y: y1 } = ocrToCss(Math.max(rect.x0, rect.x1), Math.max(rect.y0, rect.y1));
     return { x0, y0, x1, y1, w: x1 - x0, h: y1 - y0 };
   }
-  function hitHandle(px:number, py:number): Handle {
+  function hitHandle(px: number, py: number): Handle {
     if (!rect) return "new";
     const rc = rectCss(); if (!rc) return "new";
-    if (dist(px,py,rc.x0,rc.y0) <= HANDLE) return "nw";
-    if (dist(px,py,rc.x1,rc.y0) <= HANDLE) return "ne";
-    if (dist(px,py,rc.x1,rc.y1) <= HANDLE) return "se";
-    if (dist(px,py,rc.x0,rc.y1) <= HANDLE) return "sw";
-    if (Math.abs(py-rc.y0) <= HANDLE && px>=rc.x0 && px<=rc.x1) return "n";
-    if (Math.abs(px-rc.x1) <= HANDLE && py>=rc.y0 && py<=rc.y1) return "e";
-    if (Math.abs(py-rc.y1) <= HANDLE && px>=rc.x0 && px<=rc.x1) return "s";
-    if (Math.abs(px-rc.x0) <= HANDLE && py>=rc.y0 && py<=rc.y1) return "w";
-    if (px>=rc.x0 && px<=rc.x1 && py>=rc.y0 && py<=rc.y1) return "inside";
+    if (dist(px, py, rc.x0, rc.y0) <= HANDLE) return "nw";
+    if (dist(px, py, rc.x1, rc.y0) <= HANDLE) return "ne";
+    if (dist(px, py, rc.x1, rc.y1) <= HANDLE) return "se";
+    if (dist(px, py, rc.x0, rc.y1) <= HANDLE) return "sw";
+    if (Math.abs(py - rc.y0) <= HANDLE && px >= rc.x0 && px <= rc.x1) return "n";
+    if (Math.abs(px - rc.x1) <= HANDLE && py >= rc.y0 && py <= rc.y1) return "e";
+    if (Math.abs(py - rc.y1) <= HANDLE && px >= rc.x0 && px <= rc.x1) return "s";
+    if (Math.abs(px - rc.x0) <= HANDLE && py >= rc.y0 && py <= rc.y1) return "w";
+    if (px >= rc.x0 && px <= rc.x1 && py >= rc.y0 && py <= rc.y1) return "inside";
     return "new";
   }
-  function cursorForHandle(h:Handle){
-    switch(h){
+  function cursorForHandle(h: Handle) {
+    switch (h) {
       case "nw": case "se": return "nwse-resize";
       case "ne": case "sw": return "nesw-resize";
       case "n": case "s": return "ns-resize";
@@ -147,24 +150,25 @@ export default function PdfEditCanvas({
     }
   }
 
-  function onMouseDown(e: React.MouseEvent){
+  /* ---------------- Mouse events ---------------- */
+  function onMouseDown(e: React.MouseEvent) {
     if (!editable || !overlayRef.current) return;
     overlayBox.current = overlayRef.current.getBoundingClientRect();
     const px = e.clientX - overlayBox.current.left;
     const py = e.clientY - overlayBox.current.top;
     const h = hitHandle(px, py);
-    if (h === "inside" && rect){
-      drag.current = { mode:"move", startX:e.clientX, startY:e.clientY, orig:rect };
-    } else if (h === "new"){
-      drag.current = { mode:"new", startX:e.clientX, startY:e.clientY };
+    if (h === "inside" && rect) {
+      drag.current = { mode: "move", startX: e.clientX, startY: e.clientY, orig: rect };
+    } else if (h === "new") {
+      drag.current = { mode: "new", startX: e.clientX, startY: e.clientY };
     } else {
-      drag.current = { mode:"resize", startX:e.clientX, startY:e.clientY, orig:rect!, handle:h as any };
+      drag.current = { mode: "resize", startX: e.clientX, startY: e.clientY, orig: rect!, handle: h as any };
     }
     e.preventDefault();
   }
-  function onMouseMove(e: React.MouseEvent){
+  function onMouseMove(e: React.MouseEvent) {
     if (!overlayRef.current) return;
-    if (drag.current.mode === "none"){
+    if (drag.current.mode === "none") {
       const R = overlayRef.current.getBoundingClientRect();
       const h = hitHandle(e.clientX - R.left, e.clientY - R.top);
       overlayRef.current.style.cursor = editable ? cursorForHandle(h) : "default";
@@ -174,27 +178,30 @@ export default function PdfEditCanvas({
     const dxCss = e.clientX - drag.current.startX;
     const dyCss = e.clientY - drag.current.startY;
 
-    if (drag.current.mode === "new"){
+    if (drag.current.mode === "new") {
       const sx = Math.min(drag.current.startX, e.clientX) - R.left;
       const sy = Math.min(drag.current.startY, e.clientY) - R.top;
       const w = Math.abs(dxCss), h = Math.abs(dyCss);
-      const a = cssToOcr(sx, sy); const b = cssToOcr(sx + w, sy + h);
-      onRectChange({ page, x0:Math.min(a.X,b.X), y0:Math.min(a.Y,b.Y), x1:Math.max(a.X,b.X), y1:Math.max(a.Y,b.Y) });
+      const a = cssToOcr(sx, sy), b = cssToOcr(sx + w, sy + h);
+      onRectChange({ page, x0: Math.min(a.X, b.X), y0: Math.min(a.Y, b.Y), x1: Math.max(a.X, b.X), y1: Math.max(a.Y, b.Y) });
       return;
     }
-    if (drag.current.mode === "move"){
+
+    if (drag.current.mode === "move") {
       const sx = serverW / R.width, sy = serverH / R.height;
       const dX = Math.round(dxCss * sx), dY = Math.round(dyCss * sy);
       const o = drag.current.orig;
-      onRectChange({ page, x0:clamp(o.x0+dX,0,serverW-1), y0:clamp(o.y0+dY,0,serverH-1), x1:clamp(o.x1+dX,0,serverW-1), y1:clamp(o.y1+dY,0,serverH-1) });
+      onRectChange({ page, x0: clamp(o.x0 + dX, 0, serverW - 1), y0: clamp(o.y0 + dY, 0, serverH - 1),
+        x1: clamp(o.x1 + dX, 0, serverW - 1), y1: clamp(o.y1 + dY, 0, serverH - 1) });
       return;
     }
-    if (drag.current.mode === "resize"){
+
+    if (drag.current.mode === "resize") {
       const o = drag.current.orig;
       const sx = serverW / R.width, sy = serverH / R.height;
       const dX = Math.round(dxCss * sx), dY = Math.round(dyCss * sy);
       let nx0=o.x0, ny0=o.y0, nx1=o.x1, ny1=o.y1;
-      switch(drag.current.handle){
+      switch (drag.current.handle) {
         case "nw": nx0=o.x0+dX; ny0=o.y0+dY; break;
         case "n":  ny0=o.y0+dY; break;
         case "ne": nx1=o.x1+dX; ny0=o.y0+dY; break;
@@ -204,20 +211,21 @@ export default function PdfEditCanvas({
         case "sw": nx0=o.x0+dX; ny1=o.y1+dY; break;
         case "w":  nx0=o.x0+dX; break;
       }
-      onRectChange({ page, x0:clamp(nx0,0,serverW-1), y0:clamp(ny0,0,serverH-1), x1:clamp(nx1,0,serverW-1), y1:clamp(ny1,0,serverH-1) });
+      onRectChange({ page, x0:clamp(nx0,0,serverW-1), y0:clamp(ny0,0,serverH-1),
+        x1:clamp(nx1,0,serverW-1), y1:clamp(ny1,0,serverH-1) });
       return;
     }
   }
-  function onMouseUp(){
+  function onMouseUp() {
     if (drag.current.mode !== "none" && rect) onRectCommit(rect);
-    drag.current = { mode:"none" };
+    drag.current = { mode: "none" };
   }
 
-  function drawOverlay(){
+  /* ---------------- Overlay drawing ---------------- */
+  function drawOverlay() {
     const overlay = overlayRef.current; if (!overlay) return;
     overlay.innerHTML = "";
 
-    // token boxes
     if (showTokenBoxes) {
       for (const t of tokens) {
         const d = document.createElement("div");
@@ -227,63 +235,63 @@ export default function PdfEditCanvas({
       }
     }
 
-    // passive model overlays (colored)
+    // Colored model overlays
     for (const ov of overlayRects) {
       if (ov.page !== page) continue;
-      const box = document.createElement("div");
-      box.className = "ov";
-      box.style.borderColor = ov.color;
-      box.style.backgroundColor = ov.color + "22";
-      placeCss(box, ov.x0, ov.y0, ov.x1, ov.y1);
-      overlay.appendChild(box);
+      const d = document.createElement("div");
+      d.className = "ov";
+      d.style.borderColor = ov.color;
+      d.style.backgroundColor = ov.color + "22";
+      placeCss(d, ov.x0, ov.y0, ov.x1, ov.y1);
+      overlay.appendChild(d);
 
-      // small label tag
       const tag = document.createElement("div");
       tag.className = "tag";
       tag.textContent = ov.label;
       const R = overlay.getBoundingClientRect();
       const sx = R.width / serverW, sy = R.height / serverH;
       const x = Math.min(ov.x0, ov.x1) * sx, y = Math.max(0, Math.min(ov.y0, ov.y1)*sy - 16);
-      tag.style.left = `${x + 10}px`; tag.style.top = `${y}px`;
-      tag.style.background = ov.color;
+      tag.style.left = `${x + 10}px`; tag.style.top = `${y}px`; tag.style.background = ov.color;
       overlay.appendChild(tag);
     }
 
-    // edit rect (pink)
     if (rect && rect.page === page) {
       const box = document.createElement("div");
       box.className = "pink";
       placeCss(box, rect.x0, rect.y0, rect.x1, rect.y1);
       overlay.appendChild(box);
 
-      // handles
-      const rc = rectCss();
-      if (editable && rc) {
-        const hs: Array<[number, number, string]> = [
-          [rc.x0, rc.y0, "nwse-resize"],
-          [(rc.x0 + rc.x1) / 2, rc.y0, "ns-resize"],
-          [rc.x1, rc.y0, "nesw-resize"],
-          [rc.x1, (rc.y0 + rc.y1) / 2, "ew-resize"],
-          [rc.x1, rc.y1, "nwse-resize"],
-          [(rc.x0 + rc.x1) / 2, rc.y1, "ns-resize"],
-          [rc.x0, rc.y1, "nesw-resize"],
-          [rc.x0, (rc.y0 + rc.y1) / 2, "ew-resize"],
-        ];
-        for (const [x, y, cur] of hs) {
-          const h = document.createElement("div");
-          h.className = "handle";
-          h.style.left = `${x - HANDLE / 2}px`;
-          h.style.top = `${y - HANDLE / 2}px`;
-          h.style.width = `${HANDLE}px`;
-          h.style.height = `${HANDLE}px`;
-          h.style.cursor = cur;
-          overlay.appendChild(h);
+      if (editable) {
+        const rc = rectCss();
+        if (rc) {
+          const hs: Array<[number, number, string]> = [
+            [rc.x0, rc.y0, "nwse-resize"],
+            [(rc.x0 + rc.x1) / 2, rc.y0, "ns-resize"],
+            [rc.x1, rc.y0, "nesw-resize"],
+            [rc.x1, (rc.y0 + rc.y1) / 2, "ew-resize"],
+            [rc.x1, rc.y1, "nwse-resize"],
+            [(rc.x0 + rc.x1) / 2, rc.y1, "ns-resize"],
+            [rc.x0, rc.y1, "nesw-resize"],
+            [rc.x0, (rc.y0 + rc.y1) / 2, "ew-resize"],
+          ];
+          for (const [x, y, cur] of hs) {
+            const h = document.createElement("div");
+            h.className = "handle";
+            h.style.left = `${x - HANDLE / 2}px`;
+            h.style.top = `${y - HANDLE / 2}px`;
+            h.style.width = `${HANDLE}px`;
+            h.style.height = `${HANDLE}px`;
+            h.style.cursor = cur;
+            overlay.appendChild(h);
+          }
         }
       }
     }
   }
-  function placeCss(node: HTMLDivElement, x0:number, y0:number, x1:number, y1:number){
-    const overlay = overlayRef.current!; const R = overlay.getBoundingClientRect();
+
+  function placeCss(node: HTMLDivElement, x0:number, y0:number, x1:number, y1:number) {
+    const overlay = overlayRef.current!;
+    const R = overlay.getBoundingClientRect();
     const sx = R.width / serverW, sy = R.height / serverH;
     node.style.position = "absolute";
     node.style.left = `${Math.min(x0, x1) * sx}px`;
@@ -310,8 +318,7 @@ export default function PdfEditCanvas({
       <style>{`
         .overlay .tok { border:1px solid rgba(255,165,0,0.55); background: rgba(255,165,0,0.10); pointer-events:none; }
         .overlay .pink { border:2px solid rgba(236,72,153,0.95); background: rgba(236,72,153,0.18); box-shadow:0 0 0 1px rgba(236,72,153,0.25) inset; pointer-events:none; }
-        .overlay .handle { position:absolute; border-radius:3px; background: rgba(236,72,153,0.95);
-          box-shadow:0 0 0 2px #fff inset, 0 0 0 1px rgba(236,72,153,0.8); pointer-events:none; }
+        .overlay .handle { position:absolute; border-radius:3px; background: rgba(236,72,153,0.95); box-shadow:0 0 0 2px #fff inset, 0 0 0 1px rgba(236,72,153,0.8); pointer-events:none; }
         .overlay .ov { position:absolute; border:2px solid; background:transparent; pointer-events:none; }
         .overlay .tag { position:absolute; color:#fff; font: 12px/16px ui-sans-serif, system-ui; padding:0 6px; border-radius:4px; pointer-events:none; }
       `}</style>
@@ -319,5 +326,6 @@ export default function PdfEditCanvas({
   );
 }
 
+/* ========================= utils ========================= */
 function clamp(v:number, lo:number, hi:number){ return Math.max(lo, Math.min(hi, v)); }
 function dist(x1:number,y1:number,x2:number,y2:number){ return Math.hypot(x1-x2, y1-y2); }
