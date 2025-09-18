@@ -1,0 +1,144 @@
+// D) Server 5-method overlays (robust to any single model failing)
+(async () => {
+  try {
+    if (!docId) return;
+    const res = await matchField(docId, r.key, r.value);
+
+    // Server returns { hits: { autolocate, tfidf, minilm, distilbert, layoutlmv3 } }
+    const hits = (res as any)?.hits || {};
+
+    // Map server keys -> UI labels/colors
+    const serverToUi = [
+      ["autolocate",  "fuzzy"],
+      ["tfidf",       "tfidf"],
+      ["minilm",      "minilm"],
+      ["distilbert",  "distilbert"],
+      ["layoutlmv3",  "layoutlmv3"],
+    ] as const;
+
+    const pick = (m: any) =>
+      !m ? null : ({ page: m.page, x0: m.rect.x0, y0: m.rect.y0, x1: m.rect.x1, y1: m.rect.y1 });
+
+    const ovs = serverToUi.map(([srv, ui]) => ({
+      label: ui,
+      color: COLORS[ui],
+      rect: pick(hits[srv]),
+    }));
+
+    // If main rect is empty, jump to the first page that has any overlay
+    if (!rect) {
+      const first = ovs.find(o => o.rect);
+      if (first?.rect?.page) setPage(first.rect.page);
+    }
+
+    setOverlays(ovs);
+  } catch (e) {
+    console.warn("matchField failed", e);
+    setOverlays([]); // still show pink if any
+  }
+})();
+
+
+
+#########
+
+// Add near the other calls
+export async function matchField(
+  doc_id: string,
+  key: string,
+  value: string,
+  max_window = 12,
+  models_root?: string
+): Promise<any> {
+  const body: any = { doc_id, key, value, max_window };
+  if (models_root) body.models_root = models_root;
+  const r = await fetch(`${API}/lasso/locate`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json(); // { hits: {...}, pages: [...] }
+}
+
+
+#######
+
+import os
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+
+#######
+
+# Old in each loop:
+# if cnt > 1500: break  (or 1000)
+
+# New caps (faster)
+if cnt > 600: break   # autolocate/tfidf
+# and for emb models:
+if cnt > 400: break   # minilm / distilbert / layout proxy
+
+
+######
+
+max_w = max(4, min(int(req.max_window), 10))
+
+####
+
+
+@router.get("/warmup")
+def warmup(models_root: Optional[str] = None):
+  # force lazy loads
+  _ = _load_minilm(Path(models_root).resolve() if models_root else None)
+  _ = _load_distil(Path(models_root).resolve() if models_root else None)
+  _ = _load_layout(Path(models_root).resolve() if models_root else None)
+  return {"ok": True}
+
+
+####
+
+from sentence_transformers import SentenceTransformer
+from pathlib import Path
+root = Path("src/models")
+candidates = [
+    root/"sentence-transformers_all-MiniLM-L6-v2",
+    root/"sentence-transformers__all-MiniLM-L6-v2",
+    root/"all-MiniLM-L6-v2",
+]
+path = next((p for p in candidates if p.exists()), None)
+print("MiniLM path:", path)
+m = SentenceTransformer(str(path))
+emb = m.encode(["invoice total", "amount due"], normalize_embeddings=True)
+print("MiniLM OK, shape:", emb.shape, "cos=", float((emb[0]*emb[1]).sum()))
+
+
+######
+
+from transformers import AutoTokenizer, AutoModel
+import torch, numpy as np
+from pathlib import Path
+path = Path("src/models/distilbert-base-uncased")
+tok = AutoTokenizer.from_pretrained(str(path), local_files_only=True)
+mdl = AutoModel.from_pretrained(str(path), local_files_only=True).eval()
+with torch.no_grad():
+    t = tok(["invoice total", "amount due"], return_tensors="pt", padding=True, truncation=True, max_length=64)
+    hs = mdl(**t).last_hidden_state
+    mask = t["attention_mask"].unsqueeze(-1)
+    pooled = (hs*mask).sum(1) / mask.sum(1).clamp(min=1)
+    pooled = torch.nn.functional.normalize(pooled, dim=1)
+    cos = float((pooled[0] @ pooled[1].T).item())
+print("DistilBERT OK, cos=", cos)
+
+
+#####
+
+from transformers import AutoProcessor, LayoutLMv3Model
+from pathlib import Path
+p = Path("src/models/microsoft_layoutlmv3-base")
+proc = AutoProcessor.from_pretrained(str(p), local_files_only=True)
+mdl  = LayoutLMv3Model.from_pretrained(str(p), local_files_only=True)
+print("LayoutLMv3 OK:", mdl.config.hidden_size)
+
+####
+
+
