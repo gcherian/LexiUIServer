@@ -1,0 +1,61 @@
+How patterns drive each layer (with pointers to your doc)
+
+1) Orchestration Layer (multi-agent brain)
+	•	Routing: a Router Agent classifies the incoming job (“index doc”, “answer question”, “compare invoices”) and sends it to the right pipeline—crucial for dynamic, context-aware flows.  ￼
+	•	Parallelization: fan-out subtasks (e.g., run OCR, visual embedding, and quality checks concurrently) then join the results—cuts end-to-end latency.  ￼
+	•	Planning: the Planner Agent creates an execution plan (ingest → assess → embed → extract → store → verify). If facts change (e.g., OCR fails), it replans.
+	•	Tool Use: all service calls (OCR, vector DB, KG, storage) are formal “tools/functions” the agents can invoke deterministically.  ￼
+	•	Reflection / Critic: Producer (extract) → Critic (validate fields/units/consistency) → Producer (revise); improves quality over iterations. (Reflection pattern)
+	•	Resource-Aware Optimization: choose models/stores by SLA & budget (fast/cheap vs. slow/accurate), with fallbacks. (Resource-aware pattern)
+	•	Exception Handling & Recovery: retries, graceful degradation (e.g., use OCR-lite), alerts to HITL when irrecoverable. (Exception pattern)
+	•	Inter-Agent Communication (A2A): if you run specialized agents in different stacks (LangGraph/ADK), they interop via an A2A-style contract.  ￼
+
+2) Cognitive Services Layer (embeddable repos)
+	•	Text Embedder: chunk text + embed → text_chunks.
+	•	Visual Embedder: page or thumbnail embeddings → visual_pages (helps layout similarity & visual search).
+	•	Layout & KV Extractor: tokens, boxes, key→value with coordinates for provenance.
+	•	Quality Checker: outputs blur/contrast/skew, used for gating, routing, and metadata filters.
+	•	Retrievers:
+	•	Standard RAG for most Q&A.
+	•	Graph-RAG when the answer spans linked facts (contracts, parties, obligations).  ￼
+	•	Agentic-RAG adds a reasoning layer to validate sources, reconcile conflicts, and decompose multi-step queries before generation.  ￼
+
+3A) Vector Stores (multi-index, linked to knowledge)
+	•	text_chunks (dense vectors + filters): for semantic search across OCR text.
+	•	visual_pages (dense vectors): for visual/layout similarity & template detection.
+	•	layout_signatures (dense/sparse): signatures of box patterns for template reuse.
+	•	All vectors carry rich metadata (doc_id, page, bbox, quality, language).
+
+3B) Knowledge Stores (ground truth + governance)
+	•	Knowledge Graph: nodes (Document, Page, Field, Party, Currency, Clause), edges (hasPage, hasField, refersTo, obligatedBy). Great for reasoning, lineage, and “Graph-RAG”.  ￼
+	•	KV Facts: normalized fields (e.g., invoice.total.amount, currency=USD), versions, and confidence.
+	•	Metadata & Lineage: source, capture-device, model versions, pipelines used.
+	•	Audit & Evaluation: HITL decisions, overrides, and evaluator scores (for reflection & learning loops).
+
+⸻
+
+Data & control flows (end-to-end)
+	1.	Ingest → Files land; Router checks quality signal. If below threshold, route to enhancement/HITL else proceed. (Routing, Resource-Aware)  ￼
+	2.	Parallel OCR + text embed + visual embed + field extraction + quality scoring. (Parallelization)  ￼
+	3.	Persist → vectors into respective indexes; facts + layout into KG/KV; store quality metrics as metadata.
+	4.	Reflect → Critic validates totals, dates, currency consistency; gaps escalate to HITL; approved edits feed learning store. (Reflection + Human-in-the-Loop)
+	5.	Retrieve/Answer → Query routed to standard RAG or Graph-/Agentic-RAG; Planner decomposes complex asks; Tool calls execute; final answer cites sources.  ￼
+	6.	Monitor & Optimize → Prioritization queues, cost/latency dashboards; automatic model/store switching under budget/SLA. (Prioritization, Resource-Aware)  ￼
+
+⸻
+
+Repository strategy (embeddable + composable)
+	•	Each service above ships as a micro-repo (Python package and/or FastAPI) with a tool contract (schema) so Orchestrator can function-call it. (Tool Use)
+	•	Cross-framework agents communicate via A2A-style contracts (Agent Cards/skills), making the system polyglot and future-proof. (Inter-Agent Communication)  ￼
+	•	Long-term knowledge persists in KG & KV stores; short-term context lives in the orchestrator’s session memory; both are queried by RAG. (Memory/RAG)  ￼
+
+⸻
+
+What to build next (practical checklist)
+	1.	Router + Planner: small LangGraph graph with nodes: classify → plan → fan-out → join → reflect. (Routing, Planning, Parallelization)  ￼
+	2.	Three vector indexes: text_chunks, visual_pages, layout_signatures with uniform metadata schema (doc/page/bbox/quality).
+	3.	KG schema: Document–Page–Field–Party–Clause + provenance edges; plug a Graph-RAG retriever for cross-doc reasoning.  ￼
+	4.	Agentic-RAG wrapper: pre-answer validation & conflict resolution; fall back to web/tools if knowledge gaps detected.  ￼
+	5.	HITL loop: review queue, escalation policy, feedback capture to improve extractors and router. (Human-in-the-Loop)
+	6.	Resource controller: model/store selection rules; budgets & SLA; retries/fallbacks. (Resource-Aware, Exception Handling)
+	7.	A2A contracts: publish “skills” for each service, enabling federated agents to collaborate. (A2A)  ￼
