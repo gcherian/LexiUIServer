@@ -1,0 +1,33 @@
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Case Header                                                                 │
+│ Batch: ______   Case/Loan ID: ______   Source( ICMP Doc ID / Upload ): ___ │
+│ [Load] [Detect Doc Type] [Extract] [Sync Core] [Run Validations]            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Agent Panel (left, 30%)                                                     │
+│ Goal/Prompt: “Validate borrower, terms, signatures, dates vs Core.”         │
+│ Proposed Plan:                                                              │
+│   1) Fetch Core loan master                                                 │
+│   2) Extract fields from scanned PDF                                        │
+│   3) Compare borrower/address/principal/rate/dates                          │
+│   4) Check signatures present on required pages                              │
+│   5) Flag mismatches + propose fixes                                         │
+│ [Accept Plan] [Edit]  [Re-run Step 3] [Explain]                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Evidence & Work Area (right, 70%)                                           │
+│ ┌──────── PDF Viewer ────────┐  ┌────── Data Panel (Core vs Extracted) ───┐ │
+│ │ page 1/8 … highlights …   │  │ Field            Core        PDF       │ │
+│ │ signature box …            │  │ Borrower         ACME Inc.  ACME Inc.  │ │
+│ └────────────────────────────┘  │ Address          12 Market… 12 Market… │ │
+│                                 │ Principal        $250,000    $250,000  │ │
+│                                 │ Interest Rate    6.25%       6.25%     │ │
+│                                 └─────────────────────────────────────────┘ │
+│ ───────────────────────────────── Validation Results Table ─────────────── │
+│ Check                                  Status   Evidence        Action      │
+│ Borrower name matches core             ✅       tokens p1       —           │
+│ Address normalized & matches           ⚠️       edit distance   [Accept PDF]| 
+│ Principal within ±$0 tolerance         ✅       parsed money    —           │
+│ Rate within policy bounds (0–25%)      ✅       parsed percent  —           │
+│ Effective ≤ Maturity                   ✅       parsed dates    —           │
+│ Signature present on term pages        ❌       page 6 no box   [Open Lasso]│
+│ Final decision: [PASS]/[FAIL]  Notes: ___________________  [Submit]         │
+└─────────────────────────────────────────────────────────────────────────────┘
