@@ -344,49 +344,38 @@ export default function FieldLevelEditor() {
   }, [docId, rows.length]);
 
   /* -------- Row click: build overlays -------- */
-  function onRowClick(r: FieldRow) {
-    setFocusedKey(r.key);
+  async function onRowClick(r: FieldRow) {
+  setFocusedKey(r.key);
+  setOverlays([]);
+  setLoadingBoxes(true);
 
-    // A) Distil suggestion (if present) to drive pink box quickly
-    const d = distil.find((f) => f.key === r.key && f.page != null);
-    if (d && (d.confidence ?? 0) >= DISTIL_OK && d.value_union) {
-      const pg = d.value_union.page!;
-      const refined = refineWithTokens(
-        { page: pg, x0: d.value_union.x0, y0: d.value_union.y0, x1: d.value_union.x1, y1: d.value_union.y1 },
-        tokens.filter((t) => t.page === pg)
-      );
-      setPage(pg);
-      setRect(refined);
-    } else if (r.rects?.length) {
-      // B) ECM rects union
-      const byPg: Record<number, KVRect[]> = {};
-      r.rects.forEach((b) => (byPg[b.page] = byPg[b.page] ? [...byPg[b.page], b] : [b]));
-      const pg = Number(Object.keys(byPg).sort((a, b) => byPg[+b].length - byPg[+a].length)[0]);
-      const same = byPg[pg];
-      const uni = same.reduce(
-        (acc, rr) => ({
-          page: pg,
-          x0: Math.min(acc.x0, rr.x0),
-          y0: Math.min(acc.y0, rr.y0),
-          x1: Math.max(acc.x1, rr.x1),
-          y1: Math.max(acc.y1, rr.y1),
-        }),
-        { page: pg, x0: same[0].x0, y0: same[0].y0, x1: same[0].x1, y1: same[0].y1 }
-      );
-      const refined = refineWithTokens(uni, tokens.filter((t) => t.page === pg));
-      setPage(pg);
-      setRect(refined);
+  try {
+    // ask server for all model hits
+    const res = await matchField(docId, r.key, r.value);
+    const pick = (m: any): EditRect | null =>
+      m && m.rect
+        ? { page: m.page, x0: m.rect.x0, y0: m.rect.y0, x1: m.rect.x1, y1: m.rect.y1 }
+        : null;
+
+    const ovs = (["fuzzy","tfidf","minilm","distilbert"] as const)
+      .map((k) => ({ label:k, color:COLORS[k], rect: pick((res as any).methods?.[k]) }));
+
+    // select the first available model as the initial editable rect
+    const first = ovs.find(o => o.rect);
+    if (first?.rect) {
+      setPage(first.rect.page);
+      setRect(first.rect);
     } else {
-      // C) local fuzzy fallback to set pink box
-      const hit = autoLocateByValue(r.value, tokens);
-      if (hit) {
-        const refined = refineWithTokens({ page: hit.page, ...hit.rect }, tokens.filter((t) => t.page === hit.page));
-        setPage(hit.page);
-        setRect(refined);
-      } else {
-        setRect(null);
-      }
+      setRect(null);
     }
+    setOverlays(ovs);
+  } catch (e) {
+    console.warn("matchField failed", e);
+    setOverlays([]);
+  } finally {
+    setLoadingBoxes(false);
+  }
+}
 
     // D) Server 5-method overlays
     (async () => {
@@ -418,23 +407,28 @@ export default function FieldLevelEditor() {
 
   /* -------- Lasso/move/resize -> OCR preview + update KV -------- */
   async function onRectCommitted(rr: EditRect) {
-    if (!focusedKey) return;
-    try {
-      if (docId) {
-        const res = await ocrPreview(docId, rr.page, rr);
-        const text = (res?.text || "").trim();
-        setRows((prev) =>
-          prev.map((row) =>
-            row.key === focusedKey
-              ? { ...row, value: text, rects: [{ page: rr.page, x0: rr.x0, y0: rr.y0, x1: rr.x1, y1: rr.y1 }] }
-              : row
-          )
-        );
-      }
-    } catch {
-      /* preview best-effort */
+  if (!focusedKey || !docId) return;
+  try {
+    const prev = await ocrPreview(docId, rr.page, rr);
+    const text = (prev?.text || "").trim();
+
+    // Update left table if editValue is ON
+    if (editValue) {
+      setRows((prevRows) =>
+        prevRows.map((row) =>
+          row.key === focusedKey
+            ? { ...row, value: text, rects: [{ page: rr.page, x0: rr.x0, y0: rr.y0, x1: rr.x1, y1: rr.y1 }] }
+            : row
+        )
+      );
     }
+
+    // Save GT (always)
+    await saveGroundTruth(docId, focusedKey, rr, editValue ? text : undefined);
+  } catch (e) {
+    alert(`OCR/Save failed: ${String(e)}`);
   }
+}
 
   const serverW = meta[page - 1]?.w || 1;
   const serverH = meta[page - 1]?.h || 1;
@@ -468,7 +462,41 @@ export default function FieldLevelEditor() {
           <input type="checkbox" checked={showBoxes} onChange={() => setShowBoxes((v) => !v)} /> Boxes
         </label>
 
-        <button onClick={runDistilNow} disabled={!docId || !rows.length}>Refresh Distil</button>
+<label className={editValue ? "btn toggle active" : "btn toggle"} style={{ marginLeft: 8 }}>
+  <input type="checkbox" checked={editValue} onChange={() => setEditValue(v => !v)} /> Edit value
+</label>
+
+{loadingBoxes ? (
+  <span className="muted" style={{ marginLeft: 8 }}>loading matches…</span>
+) : null}
+
+<button
+  className="btn"
+  disabled={!docId || !focusedKey || !rect}
+  onClick={async () => {
+    if (!docId || !focusedKey || !rect) return;
+    try {
+      const prev = await ocrPreview(docId, rect.page, rect);
+      const text = (prev?.text || "").trim();
+      if (editValue) {
+        setRows((prevRows) =>
+          prevRows.map((row) =>
+            row.key === focusedKey
+              ? { ...row, value: text, rects: [{ page: rect.page, x0: rect.x0, y0: rect.y0, x1: rect.x1, y1: rect.y1 }] }
+              : row
+          )
+        );
+      }
+      await saveGroundTruth(docId, focusedKey, rect, editValue ? text : undefined);
+      alert("Saved ground truth.");
+    } catch (e) {
+      alert(`Save failed: ${String(e)}`);
+    }
+  }}
+  style={{ marginLeft: 8 }}
+>
+  Save GT
+</button>
 
         <span className="spacer" />
 
@@ -483,13 +511,15 @@ export default function FieldLevelEditor() {
 
         <span className="spacer" />
 
-        <div className="toolbar-inline" style={{ gap: 4 }}>
-          <button onClick={() => setZoom((z) => Math.max(0.5, Math.round((z - 0.1) * 10) / 10))}>–</button>
-          <span style={{ width: 44, textAlign: "center" }}>{Math.round(zoom * 100)}%</span>
-          <button onClick={() => setZoom((z) => Math.min(3, Math.round((z + 0.1) * 10) / 10))}>+</button>
-          <button onClick={() => setZoom(1)}>Reset</button>
-        </div>
-
+        
+<div className="toolbar-inline" style={{ gap: 6 }}>
+  {Object.entries(COLORS).map(([k,c]) => (
+    <span key={k} style={{ display:"inline-flex", alignItems:"center", gap:6, fontSize:12 }}>
+      <span style={{ width:12, height:12, background:c, border:`1px solid ${c}`, display:"inline-block", opacity:0.7 }} />
+      {k}
+    </span>
+  ))}
+</div>
         <span className="muted" style={{ marginLeft: 12 }}>API: {API}</span>
       </div>
 
