@@ -78,6 +78,22 @@ export type GroundTruthResp = {
   entries: GroundTruthEntry[];
 };
 
+/* ---------------- Ground truth ---------------- */
+export async function saveGroundTruth(
+  doc_id: string,
+  key: string,
+  rect: { page:number; x0:number; y0:number; x1:number; y1:number },
+  value?: string
+): Promise<{ ok: boolean }> {
+  const r = await fetch(`${API}/lasso/gt/save`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ doc_id, key, rect, value }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
 /* ---------------- Helpers ---------------- */
 export function docIdFromUrl(url: string): string | null {
   try {
