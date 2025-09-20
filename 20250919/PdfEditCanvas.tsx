@@ -32,9 +32,9 @@ export type EditRect = {
 };
 
 export type OverlayRect = {
-  label: string;            // "fuzzy" | "tfidf" | "minilm" | "distilbert" | "layoutlmv3"
-  color: string;            // CSS color
-  rect: EditRect | null;    // null -> not drawn
+  label: "fuzzy" | "tfidf" | "minilm" | "distilbert" | "layoutlmv3";
+  color: string;
+  rect: EditRect | null;
 };
 
 type Props = {
@@ -47,22 +47,13 @@ type Props = {
 
   tokens: TokenBox[];
   rect: EditRect | null;
-
-  /** Optional: non-editable model boxes */
   overlays?: OverlayRect[];
-
-  /** Optional: non-editable ground-truth box (white dashed) */
-  gtRect?: EditRect | null;
-
   showTokenBoxes: boolean;
   editable: boolean;
 
-  /** live change while dragging/resizing */
   onRectChange: (r: EditRect | null) => void;
-  /** commit on mouseup (triggers OCR in parent) */
   onRectCommit: (r: EditRect) => void;
 
-  /** display zoom (does not affect OCR coords) */
   zoom?: number;
 };
 
@@ -74,7 +65,6 @@ export default function PdfEditCanvas({
   tokens,
   rect,
   overlays = [],
-  gtRect = null,
   showTokenBoxes,
   editable,
   onRectChange,
@@ -87,10 +77,7 @@ export default function PdfEditCanvas({
   const baseCanvas = useRef<HTMLCanvasElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
 
-  /** Snapshot of overlay client rect (stable pointer math) */
   const overlayBox = useRef<DOMRect | null>(null);
-
-  /** Handle size in CSS px (visual space) */
   const HANDLE = 8;
 
   type Handle =
@@ -111,9 +98,10 @@ export default function PdfEditCanvas({
 
   /* ---------------- Rendering ---------------- */
   useEffect(() => {
-    let cancelled = false; // ✅ keep as boolean
+    let cancelled = false;
     (async () => {
       if (!docUrl) return;
+
       const doc = await getDocument(docUrl).promise;
       if (cancelled) return;
       pdfRef.current = doc;
@@ -122,7 +110,6 @@ export default function PdfEditCanvas({
       if (cancelled) return;
       pageRef.current = pg;
 
-      // Render with rotation=0 so server px == canvas px
       const vp1 = pg.getViewport({ scale: 1, rotation: 0 });
       const maxDisplay = 1400;
       const baseScale = Math.min(1, maxDisplay / Math.max(vp1.width, vp1.height));
@@ -130,6 +117,7 @@ export default function PdfEditCanvas({
 
       const c = baseCanvas.current!;
       const ctx = c.getContext("2d")!;
+
       c.width = Math.floor(vp.width);
       c.height = Math.floor(vp.height);
       c.style.width = `${c.width}px`;
@@ -148,7 +136,6 @@ export default function PdfEditCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [docUrl, page, zoom]);
 
-  /** Keep overlay sized with the canvas (split drag, resizes, etc.) */
   useLayoutEffect(() => {
     const c = baseCanvas.current;
     const o = overlayRef.current;
@@ -193,21 +180,15 @@ export default function PdfEditCanvas({
     const rc = rectCss();
     if (!rc) return "new";
 
-    // Corners
     if (dist(px, py, rc.x0, rc.y0) <= HANDLE) return "nw";
     if (dist(px, py, rc.x1, rc.y0) <= HANDLE) return "ne";
     if (dist(px, py, rc.x1, rc.y1) <= HANDLE) return "se";
     if (dist(px, py, rc.x0, rc.y1) <= HANDLE) return "sw";
-
-    // Edges
     if (Math.abs(py - rc.y0) <= HANDLE && px >= rc.x0 && px <= rc.x1) return "n";
     if (Math.abs(px - rc.x1) <= HANDLE && py >= rc.y0 && py <= rc.y1) return "e";
     if (Math.abs(py - rc.y1) <= HANDLE && px >= rc.x0 && px <= rc.x1) return "s";
     if (Math.abs(px - rc.x0) <= HANDLE && py >= rc.y0 && py <= rc.y1) return "w";
-
-    // Inside
     if (px >= rc.x0 && px <= rc.x1 && py >= rc.y0 && py <= rc.y1) return "inside";
-
     return "new";
   }
 
@@ -236,14 +217,7 @@ export default function PdfEditCanvas({
     } else if (h === "new") {
       drag.current = { mode: "new", startX: e.clientX, startY: e.clientY };
     } else {
-      // resize
-      drag.current = {
-        mode: "resize",
-        startX: e.clientX,
-        startY: e.clientY,
-        orig: rect!,
-        handle: h as Exclude<Handle,"inside"|"new">,
-      };
+      drag.current = { mode: "resize", startX: e.clientX, startY: e.clientY, orig: rect!, handle: h as any };
     }
     e.preventDefault();
   }
@@ -251,7 +225,6 @@ export default function PdfEditCanvas({
   function onMouseMove(e: React.MouseEvent) {
     if (!overlayRef.current) return;
 
-    // Update cursor shape when idle
     if (drag.current.mode === "none") {
       const R = overlayRef.current.getBoundingClientRect();
       const h = hitHandle(e.clientX - R.left, e.clientY - R.top);
@@ -298,8 +271,6 @@ export default function PdfEditCanvas({
 
     if (drag.current.mode === "resize") {
       const o = drag.current.orig;
-
-      // convert css delta -> ocr delta
       const sx = serverW / R.width;
       const sy = serverH / R.height;
       const dX = Math.round(dxCss * sx);
@@ -330,7 +301,7 @@ export default function PdfEditCanvas({
 
   function onMouseUp() {
     if (drag.current.mode !== "none" && rect) {
-      onRectCommit(rect); // parent will OCR and update value
+      onRectCommit(rect);
     }
     drag.current = { mode: "none" };
   }
@@ -341,7 +312,6 @@ export default function PdfEditCanvas({
     if (!overlay) return;
     overlay.innerHTML = "";
 
-    // Token visualization
     if (showTokenBoxes) {
       for (const t of tokens) {
         const d = document.createElement("div");
@@ -351,25 +321,18 @@ export default function PdfEditCanvas({
       }
     }
 
-    // GT overlay (non-editable) — drawn first so other boxes appear on top
-    if (gtRect && gtRect.page === page) {
-      const g = document.createElement("div");
-      g.className = "gt";
-      placeCss(g, gtRect.x0, gtRect.y0, gtRect.x1, gtRect.y1);
-      overlay.appendChild(g);
-    }
-
-    // Editable main box (pink)
+    // Editable main box
     if (rect && rect.page === page) {
       const box = document.createElement("div");
       box.className = "pink";
       placeCss(box, rect.x0, rect.y0, rect.x1, rect.y1);
       overlay.appendChild(box);
 
-      // Handles (draw only when editable)
+      // Handles
       if (editable) {
         const rc = rectCss();
         if (rc) {
+          const HANDLE = 8;
           const hs: Array<[number, number, string]> = [
             [rc.x0, rc.y0, "nwse-resize"],
             [(rc.x0 + rc.x1) / 2, rc.y0, "ns-resize"],
@@ -428,7 +391,7 @@ export default function PdfEditCanvas({
   useEffect(() => {
     drawOverlay();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tokens, rect, overlays, gtRect, showTokenBoxes, page, serverW, serverH]);
+  }, [tokens, rect, overlays, showTokenBoxes, page, serverW, serverH]);
 
   return (
     <div className="pdf-stage" style={{ position: "relative", overflow: "auto" }}>
@@ -469,13 +432,6 @@ export default function PdfEditCanvas({
           border-radius: 3px;
           background: rgba(236,72,153,0.95);
           box-shadow: 0 0 0 2px #fff inset, 0 0 0 1px rgba(236,72,153,0.8);
-          pointer-events: none;
-        }
-        /* dashed GT box style is defined in ocr.css (global). Kept here as fallback: */
-        .overlay .gt {
-          border: 2px dashed #ffffff;
-          background: rgba(255,255,255,0.12);
-          box-shadow: 0 0 0 1px rgba(255,255,255,0.35) inset;
           pointer-events: none;
         }
       `}</style>

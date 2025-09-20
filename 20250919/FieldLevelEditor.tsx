@@ -1,13 +1,18 @@
-// ui/src/tsp4/components/lasso/FieldLevelEditor.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import "../ocr.css";
 import PdfEditCanvas, { type EditRect, type TokenBox } from "./PdfEditCanvas";
 
 import {
-  API, uploadPdf, getMeta, getBoxes, docIdFromUrl, ocrPreview,
-  matchField, saveGroundTruth, getGroundTruth,
-  distilExtract, type DistilField,
-} from "../../../lib/api";
+  API,
+  uploadPdf,
+  getMeta,
+  getBoxes,
+  docIdFromUrl,
+  ocrPreview,
+  distilExtract,
+  type DistilField,
+  matchField,
+} from "../../lib/api";
 
 /* ========================= Types & Helpers ========================== */
 type KVRect = { page: number; x0: number; y0: number; x1: number; y1: number };
@@ -19,7 +24,7 @@ const COLORS: Record<string,string> = {
   tfidf: "#3b82f6",
   minilm: "#a855f7",
   distilbert: "#ef4444",
-  // layoutlmv3: "#f59e0b", // disabled for now
+  layoutlmv3: "#f59e0b",
 };
 
 const ABBREV: Record<string, string> = {
@@ -33,15 +38,24 @@ const ABBREV: Record<string, string> = {
   ct: "court", "ct.": "court",
 };
 const norm = (s: string) =>
-  (s || "").toLowerCase().normalize("NFKC").replace(/[\u00A0]/g, " ").replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
+  (s || "")
+    .toLowerCase()
+    .normalize("NFKC")
+    .replace(/[\u00A0]/g, " ")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 const normNum = (s: string) =>
   (s || "").toLowerCase().normalize("NFKC").replace(/[,$]/g, "").replace(/\s+/g, " ").trim();
 
 function levRatio(a: string, b: string): number {
-  const m = a.length, n = b.length; if (!m && !n) return 1;
-  const dp: number[] = new Array(n + 1); for (let j = 0; j <= n; j++) dp[j] = j;
+  const m = a.length, n = b.length;
+  if (!m && !n) return 1;
+  const dp: number[] = new Array(n + 1);
+  for (let j = 0; j <= n; j++) dp[j] = j;
   for (let i = 1; i <= m; i++) {
-    let prev = dp[0]; dp[0] = i;
+    let prev = dp[0];
+    dp[0] = i;
     for (let j = 1; j <= n; j++) {
       const tmp = dp[j];
       dp[j] = Math.min(dp[j] + 1, dp[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
@@ -50,9 +64,15 @@ function levRatio(a: string, b: string): number {
   }
   return 1 - dp[n] / Math.max(1, Math.max(m, n));
 }
+
 function unionRect(span: TokenBox[]) {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  for (const t of span) { x0 = Math.min(x0, t.x0); y0 = Math.min(y0, t.y0); x1 = Math.max(x1, t.x1); y1 = Math.max(y1, t.y1); }
+  for (const t of span) {
+    x0 = Math.min(x0, t.x0);
+    y0 = Math.min(y0, t.y0);
+    x1 = Math.max(x1, t.x1);
+    y1 = Math.max(y1, t.y1);
+  }
   return { x0: Math.floor(x0), y0: Math.floor(y0), x1: Math.ceil(x1), y1: Math.ceil(y1) };
 }
 function linePenalty(span: TokenBox[]) {
@@ -66,25 +86,48 @@ function linePenalty(span: TokenBox[]) {
 
 /** Local fuzzy by value */
 function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 16) {
-  const raw = (valueRaw || "").trim(); if (!raw) return null;
+  const raw = (valueRaw || "").trim();
+  if (!raw) return null;
+
   const looksNumeric = /^[\s\-$€£₹,.\d/]+$/.test(raw);
-  const words = looksNumeric ? [normNum(raw)] : norm(raw).split(" ").map((w) => ABBREV[w] ?? w);
+  const words = looksNumeric
+    ? [normNum(raw)]
+    : norm(raw).split(" ").map((w) => ABBREV[w] ?? w);
 
   const byPage = new Map<number, TokenBox[]>();
-  for (const t of allTokens) (byPage.get(t.page) || byPage.set(t.page, []).get(t.page)!).push(t);
-  byPage.forEach((arr) => arr.sort((a, b) => (a.y0 === b.y0 ? a.x0 - b.x0 : a.y0 - b.y0)));
+  for (const t of allTokens) {
+    (byPage.get(t.page) || byPage.set(t.page, []).get(t.page)!).push(t);
+  }
+  byPage.forEach((arr) =>
+    arr.sort((a, b) => (a.y0 === b.y0 ? a.x0 - b.x0 : a.y0 - b.y0))
+  );
 
   let best: { score: number; page: number; span: TokenBox[] } | null = null;
+
   function scoreSpan(span: TokenBox[]) {
-    const txt = span.map((t) => (t.text || "")).join(" ").toLowerCase().normalize("NFKC").replace(/[^\p{L}\p{N}\s]/gu, " ");
+    const txt = span
+      .map((t) => (t.text || ""))
+      .join(" ")
+      .toLowerCase()
+      .normalize("NFKC")
+      .replace(/[^\p{L}\p{N}\s]/gu, " ");
     const spanWords = txt.split(/\s+/).filter(Boolean).map((w) => ABBREV[w] ?? w);
+
     if (looksNumeric) {
       const fuzz = levRatio(spanWords.join(" "), words.join(" "));
       return fuzz - Math.min(0.25, linePenalty(span) * 0.12);
     }
-    let covered = 0; let j = 0;
+
+    let covered = 0;
+    let j = 0;
     for (let i = 0; i < words.length && j < spanWords.length; ) {
-      if (words[i] === spanWords[j] || levRatio(words[i], spanWords[j]) >= 0.8) { covered++; i++; j++; } else { j++; }
+      if (words[i] === spanWords[j] || levRatio(words[i], spanWords[j]) >= 0.8) {
+        covered++;
+        i++;
+        j++;
+      } else {
+        j++;
+      }
     }
     const coverage = covered / Math.max(1, words.length);
     const fuzz = levRatio(spanWords.join(" "), words.join(" "));
@@ -100,11 +143,13 @@ function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 
         const token = (t.text || "").trim();
         if (!token) continue;
         span.push(t);
+
         if (span.length === 1 && !looksNumeric) {
           const first = words[0];
           const tokenN = token.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, "");
           if (levRatio(first, tokenN) < 0.6) continue;
         }
+
         const s = scoreSpan(span);
         if (!best || s > best.score) best = { score: s, page: pg, span: [...span] };
       }
@@ -116,6 +161,7 @@ function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 
   return { page: best.page, rect, score: best.score };
 }
 
+/** Token refinement */
 function refineWithTokens(
   union: { page: number; x0: number; y0: number; x1: number; y1: number },
   pageTokens: TokenBox[]
@@ -129,38 +175,98 @@ function refineWithTokens(
   const pool = pageTokens.filter(inBox);
   if (!pool.length) return union;
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  for (const t of pool) { x0 = Math.min(x0, t.x0); y0 = Math.min(y0, t.y0); x1 = Math.max(x1, t.x1); y1 = Math.max(y1, t.y1); }
+  for (const t of pool) {
+    x0 = Math.min(x0, t.x0); y0 = Math.min(y0, t.y0);
+    x1 = Math.max(x1, t.x1); y1 = Math.max(y1, t.y1);
+  }
   return { page: union.page, x0, y0, x1, y1 };
 }
 
-/* ========================= Component ========================== */
-export default function FieldLevelEditor() {
-  const [docUrl, setDocUrl] = useState("");
-  const [docId, setDocId] = useState("");
-  const [meta, setMeta] = useState<{ w: number; h: number }[]>([]);
-  const [page, setPage] = useState(1);
+/* Flatten ECM-like JSON to rows */
+function normalizeRects(x: any): KVRect[] | undefined {
+  if (!x) return undefined;
+  const arr = Array.isArray(x) ? x : [x];
+  const out: KVRect[] = [];
+  for (const b of arr) {
+    if (b && Number.isFinite(+b.page)) {
+      if (b.x != null && b.y != null && b.w != null && b.h != null) {
+        out.push({ page: +b.page, x0: +b.x, y0: +b.y, x1: +b.x + +b.w, y1: +b.y + +b.h });
+      } else {
+        out.push({ page: +b.page, x0: +b.x0, y0: +b.y0, x1: +b.x1, y1: +b.y1 });
+      }
+    }
+  }
+  return out.length ? out : undefined;
+}
+function tryStr(v: any) { try { return typeof v === "string" ? v : JSON.stringify(v); } catch { return String(v); } }
+type FlatKV = { key: string; value: string; rects?: KVRect[] };
+function flattenJson(obj: any, prefix = ""): FlatKV[] {
+  const rows: FlatKV[] = [];
+  const push = (k: string, v: any) => rows.push({ key: k, value: v == null ? "" : String(v) });
+  if (obj === null || obj === undefined) return [{ key: prefix || "(null)", value: "" }];
 
+  if (Array.isArray(obj)) {
+    obj.forEach((v, i) => {
+      const path = prefix ? `${prefix}[${i}]` : `[${i}]`;
+      if (typeof v === "object" && v !== null) rows.push(...flattenJson(v, path));
+      else push(path, v);
+    });
+    return rows;
+  }
+  if (typeof obj !== "object") return [{ key: prefix || "(value)", value: String(obj) }];
+
+  for (const k of Object.keys(obj)) {
+    const path = prefix ? `${prefix}.${k}` : k;
+    const v = (obj as AnyJson)[k];
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      const rects = normalizeRects((v as AnyJson).bboxes || (v as AnyJson).boxes || (v as AnyJson).bbox || (v as AnyJson).rects);
+      if ("value" in v || rects) {
+        rows.push({ key: path, value: "value" in v ? String((v as AnyJson).value ?? "") : tryStr(v), rects });
+      } else {
+        rows.push(...flattenJson(v, path));
+      }
+    } else if (Array.isArray(v)) {
+      rows.push(...flattenJson(v, path));
+    } else {
+      push(path, v);
+    }
+  }
+  return rows;
+}
+
+/* ========================= Component ========================== */
+
+export default function FieldLevelEditor() {
+  // doc + page
+  const [docUrl, setDocUrl] = useState<string>("");
+  const [docId, setDocId] = useState<string>("");
+  const [meta, setMeta] = useState<{ w: number; h: number }[]>([]);
+  const [page, setPage] = useState<number>(1);
+
+  // tokens (orange)
   const [tokens, setTokens] = useState<TokenBox[]>([]);
   const tokensPage = useMemo(() => tokens.filter((t) => t.page === page), [tokens, page]);
 
+  // left table (extraction)
   const [rows, setRows] = useState<FieldRow[]>([]);
-  const [focusedKey, setFocusedKey] = useState("");
+  const [focusedKey, setFocusedKey] = useState<string>("");
 
+  // overlays
   const [rect, setRect] = useState<EditRect | null>(null);
   const [overlays, setOverlays] = useState<{label:string;color:string;rect:EditRect|null}[]>([]);
-  const [showBoxes, setShowBoxes] = useState(false);
+  const [showBoxes, setShowBoxes] = useState<boolean>(false);
 
-  const [zoom, setZoom] = useState(1);
+  // optional zoom
+  const [zoom, setZoom] = useState<number>(1);
 
+  // Distil results cache (optional)
   const [distil, setDistil] = useState<DistilField[]>([]);
   const DISTIL_OK = 0.45;
 
-  const [ious, setIous] = useState<Record<string, number> | null>(null);
-  const [gtMap, setGtMap] = useState<Record<string, any>>({});
-
   /* -------- Uploads -------- */
   async function onUploadPdf(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0]; if (!f) return;
+    const f = e.target.files?.[0];
+    if (!f) return;
     try {
       const res = await uploadPdf(f);
       setDocId(res.doc_id);
@@ -171,24 +277,22 @@ export default function FieldLevelEditor() {
       setPage(1);
       setRect(null);
       setOverlays([]);
-      setIous(null);
-      const gt = await getGroundTruth(res.doc_id).catch(() => ({fields:{}} as any));
-      setGtMap(gt.fields || {});
     } finally {
       (e.target as HTMLInputElement).value = "";
     }
   }
 
   async function onUploadEcm(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0]; if (!f) return;
+    const f = e.target.files?.[0];
+    if (!f) return;
     try {
       const parsed = JSON.parse(await f.text()) as AnyJson;
-      const fr: FieldRow[] = flattenJson(parsed).map((kv) => ({ key: kv.key, value: kv.value, rects: kv.rects }));
+      const flat = flattenJson(parsed);
+      const fr: FieldRow[] = flat.map((kv) => ({ key: kv.key, value: kv.value, rects: kv.rects }));
       setRows(fr);
       setFocusedKey("");
       setRect(null);
       setOverlays([]);
-      setIous(null);
     } catch {
       alert("Invalid ECM JSON");
     } finally {
@@ -196,8 +300,9 @@ export default function FieldLevelEditor() {
     }
   }
 
+  /* -------- Paste /data/{doc}/original.pdf -------- */
   useEffect(() => {
-    const id = docIdFromUrl(docUrl);
+    const id = docIdFromUrl(docUrl || "");
     if (!id) return;
     (async () => {
       setDocId(id);
@@ -207,17 +312,18 @@ export default function FieldLevelEditor() {
       setPage(1);
       setRect(null);
       setOverlays([]);
-      setIous(null);
-      const gt = await getGroundTruth(id).catch(() => ({fields:{}} as any));
-      setGtMap(gt.fields || {});
     })();
   }, [docUrl]);
 
+  /* -------- Distil Runner (best-effort; no hard dependency) -------- */
   async function runDistilNow() {
     if (!docId || !rows.length) return;
     const specs = rows.map((r) => {
       const k = r.key.toLowerCase();
-      const type = k.includes("zip") ? "zip" : k.includes("date") ? "date" : (k.includes("amount") || k.includes("total")) ? "amount" : "text";
+      const type =
+        k.includes("zip") ? "zip" :
+        k.includes("date") ? "date" :
+        k.includes("amount") || k.includes("total") ? "amount" : "text";
       const label = r.key.replace(/\./g, " ").replace(/\[\d+\]/g, " ").replace(/\s+/g, " ").trim();
       return { key: r.key, label, type };
     });
@@ -228,42 +334,71 @@ export default function FieldLevelEditor() {
       setDistil([]);
     }
   }
-  useEffect(() => { if (docId && rows.length) runDistilNow(); /* eslint-disable-next-line */ }, [docId, rows.length]);
 
+  useEffect(() => {
+    if (docId && rows.length) runDistilNow();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docId, rows.length]);
+
+  /* -------- Row click: run server matcher + local fallbacks -------- */
   function onRowClick(r: FieldRow) {
     setFocusedKey(r.key);
-    setIous(null);
 
-    // A) Distil suggestion -> pink (optional)
+    // A) Distil suggestion (best-effort)
     const d = distil.find((f) => f.key === r.key && f.page != null);
     if (d && (d.confidence ?? 0) >= DISTIL_OK && d.value_union) {
       const pg = d.value_union.page!;
       const refined = refineWithTokens(
-        { page: pg, x0: d.value_union.x0, y0: d.value_union.y0, x1: d.value_union.x1, y1: d.value_union.y1 },
+        { page: pg, x0: d.value_union.x0!, y0: d.value_union.y0!, x1: d.value_union.x1!, y1: d.value_union.y1! },
         tokens.filter((t) => t.page === pg)
       );
       setPage(pg);
       setRect(refined);
-    } else {
-      // fallback to fuzzy as initial pink
-      const hit = autoLocateByValue(r.value, tokens);
-      if (hit) {
-        const refined = refineWithTokens({ page: hit.page, ...hit.rect }, tokens.filter((t) => t.page === hit.page));
-        setPage(hit.page);
-        setRect(refined);
-      } else {
-        setRect(null);
-      }
     }
 
-    // D) Server overlays (4 models)
+    // B) ECM JSON rects if present
+    if (r.rects?.length) {
+      const byPg: Record<number, KVRect[]> = {};
+      r.rects.forEach((b) => (byPg[b.page] = byPg[b.page] ? [...byPg[b.page], b] : [b]));
+      const pg = Number(Object.keys(byPg).sort((a, b) => byPg[+b].length - byPg[+a].length)[0]);
+      const same = byPg[pg];
+      const uni = same.reduce(
+        (acc, rr) => ({
+          page: pg,
+          x0: Math.min(acc.x0, rr.x0),
+          y0: Math.min(acc.y0, rr.y0),
+          x1: Math.max(acc.x1, rr.x1),
+          y1: Math.max(acc.y1, rr.y1),
+        }),
+        { page: pg, x0: same[0].x0, y0: same[0].y0, x1: same[0].x1, y1: same[0].y1 }
+      );
+      const refined = refineWithTokens(uni, tokens.filter((t) => t.page === pg));
+      setPage(pg);
+      setRect(refined);
+    }
+
+    // C) Local fuzzy fallback
+    const hit = autoLocateByValue(r.value, tokens);
+    if (hit) {
+      const refined = refineWithTokens({ page: hit.page, ...hit.rect }, tokens.filter((t) => t.page === hit.page));
+      setPage(hit.page);
+      setRect(refined);
+    } else {
+      setRect(null);
+    }
+
+    // D) Server 5-method overlays (4 core + optional layout)
     (async () => {
       try {
         if (!docId) return;
         const res = await matchField(docId, r.key, r.value);
-        const pick = (m: any): EditRect | null => !m ? null : ({ page: m.page, x0: m.rect.x0, y0: m.rect.y0, x1: m.rect.x1, y1: m.rect.y1 });
-        const ks = ["fuzzy","tfidf","minilm","distilbert"] as const;
-        const ovs = ks.map((k) => ({ label: k, color: COLORS[k], rect: pick(res.hits?.[k]) }));
+        const pick = (m: any): EditRect | null =>
+          !m ? null : ({ page: m.page, x0: m.rect.x0, y0: m.rect.y0, x1: m.rect.x1, y1: m.rect.y1 });
+        const ovs = (["fuzzy","tfidf","minilm","distilbert","layoutlmv3"] as const).map((k) => ({
+          label: k,
+          color: COLORS[k],
+          rect: pick((res as any).methods?.[k]),
+        }));
         if (!rect) {
           const pg = ovs.find(o => o.rect)?.rect?.page;
           if (pg) setPage(pg);
@@ -276,6 +411,7 @@ export default function FieldLevelEditor() {
     })();
   }
 
+  /* -------- Lasso/move/resize → OCR preview + update KV -------- */
   async function onRectCommitted(rr: EditRect) {
     if (!focusedKey) return;
     try {
@@ -290,28 +426,15 @@ export default function FieldLevelEditor() {
           )
         );
       }
-    } catch { /* best-effort */ }
-  }
-
-  async function onSaveGt() {
-    if (!docId || !focusedKey || !rect) {
-      alert("Pick a field and draw/position the pink box first.");
-      return;
-    }
-    try {
-      const row = rows.find(r => r.key === focusedKey);
-      const value = row?.value || "";
-      const resp = await saveGroundTruth(docId, focusedKey, rect, value);
-      setIous(resp.ious || null);
-      setGtMap(prev => ({ ...prev, [focusedKey]: resp.gt }));
-    } catch (e) {
-      console.error("saveGroundTruth failed:", e);
-      alert("Failed to save ground truth; see console.");
+    } catch {
+      /* preview best-effort */
     }
   }
 
   const serverW = meta[page - 1]?.w || 1;
   const serverH = meta[page - 1]?.h || 1;
+
+  /* ========================= Render ========================== */
 
   return (
     <div className="workbench">
@@ -355,23 +478,7 @@ export default function FieldLevelEditor() {
 
         <span className="spacer" />
 
-        <div className="toolbar-inline" style={{ gap: 8, marginLeft: 12 }}>
-          <button onClick={onSaveGt} disabled={!docId || !focusedKey || !rect} title="Save current pink box as ground truth for the selected field">
-            Save GT
-          </button>
-          {ious && (
-            <div style={{ display:"inline-flex", gap:12, alignItems:"center", fontSize:12 }}>
-              <span className="muted">IoU:</span>
-              {Object.entries(ious).map(([k,v]) => (
-                <span key={k} style={{ display:"inline-flex", alignItems:"center", gap:4 }}>
-                  <b>{k}</b><span>{(v*100).toFixed(1)}%</span>
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="toolbar-inline" style={{ gap: 4, marginLeft: 12 }}>
+        <div className="toolbar-inline" style={{ gap: 4 }}>
           <button onClick={() => setZoom((z) => Math.max(0.5, Math.round((z - 0.1) * 10) / 10))}>–</button>
           <span style={{ width: 44, textAlign: "center" }}>{Math.round(zoom * 100)}%</span>
           <button onClick={() => setZoom((z) => Math.min(3, Math.round((z + 0.1) * 10) / 10))}>+</button>
@@ -382,7 +489,7 @@ export default function FieldLevelEditor() {
       </div>
 
       <div className="wb-split" style={{ display: "flex", gap: 12 }}>
-        {/* LEFT: KV table */}
+        {/* LEFT 30% — KV table */}
         <div className="wb-left" style={{ flexBasis: "30%", flexGrow: 0, flexShrink: 0, overflow: "auto" }}>
           <div className="section-title">Extraction</div>
           {!rows.length ? (
@@ -395,17 +502,13 @@ export default function FieldLevelEditor() {
               <tbody>
                 {rows.map((r, i) => {
                   const focused = r.key === focusedKey;
-                  const hasGt = !!gtMap[r.key];
                   return (
                     <tr
                       key={r.key + ":" + i}
                       onClick={() => onRowClick(r)}
                       style={focused ? { outline: "2px solid #ec4899", outlineOffset: -2 } : undefined}
                     >
-                      <td>
-                        <code>{r.key}</code>
-                        {hasGt ? <span title="Has GT" style={{marginLeft:6, width:8, height:8, display:"inline-block", borderRadius:4, background:"#10b981"}}/> : null}
-                      </td>
+                      <td><code>{r.key}</code></td>
                       <td style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                         {r.value}
                       </td>
@@ -417,7 +520,7 @@ export default function FieldLevelEditor() {
           )}
         </div>
 
-        {/* RIGHT: PDF */}
+        {/* RIGHT 70% — PDF */}
         <div className="wb-right" style={{ flexBasis: "70%", overflow: "auto" }}>
           {docUrl ? (
             <>
@@ -434,7 +537,6 @@ export default function FieldLevelEditor() {
                 tokens={tokensPage}
                 rect={rect}
                 overlays={overlays}
-                gtRect={gtForCurrentKey}
                 showTokenBoxes={showBoxes}
                 editable={true}
                 onRectChange={setRect}
@@ -449,56 +551,4 @@ export default function FieldLevelEditor() {
       </div>
     </div>
   );
-}
-
-/* ---------- JSON flattener ---------- */
-type FlatKV = { key: string; value: string; rects?: KVRect[] };
-function tryStr(v: any) { try { return typeof v === "string" ? v : JSON.stringify(v); } catch { return String(v); } }
-function normalizeRects(x: any): KVRect[] | undefined {
-  if (!x) return undefined;
-  const arr = Array.isArray(x) ? x : [x];
-  const out: KVRect[] = [];
-  for (const b of arr) {
-    if (b && Number.isFinite(+b.page)) {
-      if (b.x != null && b.y != null && b.w != null && b.h != null) {
-        out.push({ page: +b.page, x0: +b.x, y0: +b.y, x1: +b.x + +b.w, y1: +b.y + +b.h });
-      } else {
-        out.push({ page: +b.page, x0: +b.x0, y0: +b.y0, x1: +b.x1, y1: +b.y1 });
-      }
-    }
-  }
-  return out.length ? out : undefined;
-}
-function flattenJson(obj: any, prefix = ""): FlatKV[] {
-  const rows: FlatKV[] = [];
-  const push = (k: string, v: any) => rows.push({ key: k, value: v == null ? "" : String(v) });
-  if (obj === null || obj === undefined) return [{ key: prefix || "(null)", value: "" }];
-
-  if (Array.isArray(obj)) {
-    obj.forEach((v, i) => {
-      const path = prefix ? `${prefix}[${i}]` : `[${i}]`;
-      if (typeof v === "object" && v !== null) rows.push(...flattenJson(v, path));
-      else push(path, v);
-    });
-    return rows;
-  }
-  if (typeof obj !== "object") return [{ key: prefix || "(value)", value: String(obj) }];
-
-  for (const k of Object.keys(obj)) {
-    const path = prefix ? `${prefix}.${k}` : k;
-    const v = obj[k];
-    if (v && typeof v === "object" && !Array.isArray(v)) {
-      const rects = normalizeRects(v.bboxes || v.boxes || v.bbox || v.rects);
-      if ("value" in v || rects) {
-        rows.push({ key: path, value: "value" in v ? String(v.value ?? "") : tryStr(v), rects });
-      } else {
-        rows.push(...flattenJson(v, path));
-      }
-    } else if (Array.isArray(v)) {
-      rows.push(...flattenJson(v, path));
-    } else {
-      push(path, v);
-    }
-  }
-  return rows;
 }
