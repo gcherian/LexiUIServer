@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import "../ocr.css";
-import PdfEditCanvas, { type EditRect, type TokenBox } from "./PdfEditCanvas";
+import PdfEditCanvas, { type EditRect, type TokenBox, type OverlayRect } from "./PdfEditCanvas";
 
 import {
   API,
@@ -12,14 +12,15 @@ import {
   distilExtract,
   type DistilField,
   matchField,
-} from "../../lib/api";
+  type MatchResp,
+} from "../../../lib/api";
 
-/* ========================= Types & Helpers ========================== */
+/* ========================= Types & helpers ========================== */
 type KVRect = { page: number; x0: number; y0: number; x1: number; y1: number };
 type AnyJson = Record<string, any>;
 type FieldRow = { key: string; value: string; rects?: KVRect[] };
 
-const COLORS: Record<string,string> = {
+const COLORS: Record<string, string> = {
   fuzzy: "#22c55e",
   tfidf: "#3b82f6",
   minilm: "#a855f7",
@@ -37,6 +38,7 @@ const ABBREV: Record<string, string> = {
   hwy: "highway", "hwy.": "highway",
   ct: "court", "ct.": "court",
 };
+
 const norm = (s: string) =>
   (s || "")
     .toLowerCase()
@@ -45,6 +47,7 @@ const norm = (s: string) =>
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
+
 const normNum = (s: string) =>
   (s || "").toLowerCase().normalize("NFKC").replace(/[,$]/g, "").replace(/\s+/g, " ").trim();
 
@@ -161,7 +164,7 @@ function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 
   return { page: best.page, rect, score: best.score };
 }
 
-/** Token refinement */
+/** Tighten a union box to token bounds inside it */
 function refineWithTokens(
   union: { page: number; x0: number; y0: number; x1: number; y1: number },
   pageTokens: TokenBox[]
@@ -217,11 +220,11 @@ function flattenJson(obj: any, prefix = ""): FlatKV[] {
 
   for (const k of Object.keys(obj)) {
     const path = prefix ? `${prefix}.${k}` : k;
-    const v = (obj as AnyJson)[k];
+    const v = obj[k];
     if (v && typeof v === "object" && !Array.isArray(v)) {
-      const rects = normalizeRects((v as AnyJson).bboxes || (v as AnyJson).boxes || (v as AnyJson).bbox || (v as AnyJson).rects);
+      const rects = normalizeRects(v.bboxes || v.boxes || v.bbox || v.rects);
       if ("value" in v || rects) {
-        rows.push({ key: path, value: "value" in v ? String((v as AnyJson).value ?? "") : tryStr(v), rects });
+        rows.push({ key: path, value: "value" in v ? String(v.value ?? "") : tryStr(v), rects });
       } else {
         rows.push(...flattenJson(v, path));
       }
@@ -240,10 +243,10 @@ export default function FieldLevelEditor() {
   // doc + page
   const [docUrl, setDocUrl] = useState<string>("");
   const [docId, setDocId] = useState<string>("");
-  const [meta, setMeta] = useState<{ w: number; h: number }[]>([]);
+  const [meta, setMeta] = useState<Array<{ w: number; h: number }>>([]);
   const [page, setPage] = useState<number>(1);
 
-  // tokens (orange)
+  // tokens
   const [tokens, setTokens] = useState<TokenBox[]>([]);
   const tokensPage = useMemo(() => tokens.filter((t) => t.page === page), [tokens, page]);
 
@@ -253,13 +256,13 @@ export default function FieldLevelEditor() {
 
   // overlays
   const [rect, setRect] = useState<EditRect | null>(null);
-  const [overlays, setOverlays] = useState<{label:string;color:string;rect:EditRect|null}[]>([]);
+  const [overlays, setOverlays] = useState<OverlayRect[]>([]);
   const [showBoxes, setShowBoxes] = useState<boolean>(false);
 
-  // optional zoom
+  // zoom
   const [zoom, setZoom] = useState<number>(1);
 
-  // Distil results cache (optional)
+  // Distil results (optional)
   const [distil, setDistil] = useState<DistilField[]>([]);
   const DISTIL_OK = 0.45;
 
@@ -302,7 +305,7 @@ export default function FieldLevelEditor() {
 
   /* -------- Paste /data/{doc}/original.pdf -------- */
   useEffect(() => {
-    const id = docIdFromUrl(docUrl || "");
+    const id = docIdFromUrl(docUrl);
     if (!id) return;
     (async () => {
       setDocId(id);
@@ -340,24 +343,22 @@ export default function FieldLevelEditor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [docId, rows.length]);
 
-  /* -------- Row click: run server matcher + local fallbacks -------- */
+  /* -------- Row click: build overlays -------- */
   function onRowClick(r: FieldRow) {
     setFocusedKey(r.key);
 
-    // A) Distil suggestion (best-effort)
+    // A) Distil suggestion (if present) to drive pink box quickly
     const d = distil.find((f) => f.key === r.key && f.page != null);
     if (d && (d.confidence ?? 0) >= DISTIL_OK && d.value_union) {
       const pg = d.value_union.page!;
       const refined = refineWithTokens(
-        { page: pg, x0: d.value_union.x0!, y0: d.value_union.y0!, x1: d.value_union.x1!, y1: d.value_union.y1! },
+        { page: pg, x0: d.value_union.x0, y0: d.value_union.y0, x1: d.value_union.x1, y1: d.value_union.y1 },
         tokens.filter((t) => t.page === pg)
       );
       setPage(pg);
       setRect(refined);
-    }
-
-    // B) ECM JSON rects if present
-    if (r.rects?.length) {
+    } else if (r.rects?.length) {
+      // B) ECM rects union
       const byPg: Record<number, KVRect[]> = {};
       r.rects.forEach((b) => (byPg[b.page] = byPg[b.page] ? [...byPg[b.page], b] : [b]));
       const pg = Number(Object.keys(byPg).sort((a, b) => byPg[+b].length - byPg[+a].length)[0]);
@@ -375,32 +376,36 @@ export default function FieldLevelEditor() {
       const refined = refineWithTokens(uni, tokens.filter((t) => t.page === pg));
       setPage(pg);
       setRect(refined);
-    }
-
-    // C) Local fuzzy fallback
-    const hit = autoLocateByValue(r.value, tokens);
-    if (hit) {
-      const refined = refineWithTokens({ page: hit.page, ...hit.rect }, tokens.filter((t) => t.page === hit.page));
-      setPage(hit.page);
-      setRect(refined);
     } else {
-      setRect(null);
+      // C) local fuzzy fallback to set pink box
+      const hit = autoLocateByValue(r.value, tokens);
+      if (hit) {
+        const refined = refineWithTokens({ page: hit.page, ...hit.rect }, tokens.filter((t) => t.page === hit.page));
+        setPage(hit.page);
+        setRect(refined);
+      } else {
+        setRect(null);
+      }
     }
 
-    // D) Server 5-method overlays (4 core + optional layout)
+    // D) Server 5-method overlays
     (async () => {
       try {
         if (!docId) return;
-        const res = await matchField(docId, r.key, r.value);
+        const res: MatchResp = await matchField(docId, r.key, r.value);
         const pick = (m: any): EditRect | null =>
-          !m ? null : ({ page: m.page, x0: m.rect.x0, y0: m.rect.y0, x1: m.rect.x1, y1: m.rect.y1 });
-        const ovs = (["fuzzy","tfidf","minilm","distilbert","layoutlmv3"] as const).map((k) => ({
+          !m || !m.rect ? null : ({ page: m.page, x0: m.rect.x0, y0: m.rect.y0, x1: m.rect.x1, y1: m.rect.y1 });
+
+        const labels: string[] = ["fuzzy", "tfidf", "minilm", "distilbert", "layoutlmv3"];
+        const ovs: OverlayRect[] = labels.map((k) => ({
           label: k,
-          color: COLORS[k],
+          color: COLORS[k as keyof typeof COLORS] ?? "#999",
           rect: pick((res as any).methods?.[k]),
         }));
+
+        // if we didn’t place pink rect earlier, jump to first overlay page
         if (!rect) {
-          const pg = ovs.find(o => o.rect)?.rect?.page;
+          const pg = ovs.find((o) => o.rect)?.rect?.page;
           if (pg) setPage(pg);
         }
         setOverlays(ovs);
@@ -411,7 +416,7 @@ export default function FieldLevelEditor() {
     })();
   }
 
-  /* -------- Lasso/move/resize → OCR preview + update KV -------- */
+  /* -------- Lasso/move/resize -> OCR preview + update KV -------- */
   async function onRectCommitted(rr: EditRect) {
     if (!focusedKey) return;
     try {
@@ -500,7 +505,7 @@ export default function FieldLevelEditor() {
                 <tr><th style={{ width: "42%" }}>Key</th><th>Value</th></tr>
               </thead>
               <tbody>
-                {rows.map((r, i) => {
+                {rows.map((r: FieldRow, i: number) => {
                   const focused = r.key === focusedKey;
                   return (
                     <tr
