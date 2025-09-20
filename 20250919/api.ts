@@ -161,24 +161,71 @@ export async function distilExtract(
 }
 
 /** 5-method matcher (fuzzy/tfidf/minilm/distilbert/layoutlmv3) */
+// --- replace existing matchField with this version ---
 export async function matchField(
   doc_id: string,
   key: string,
   value: string,
   max_window = 12,
-  models_root?: string
+  models: Array<"fuzzy"|"tfidf"|"minilm"|"distilbert"> = ["fuzzy","tfidf","minilm","distilbert"],
+  wait_heavy = false
 ): Promise<MatchResp> {
   const r = await fetch(`${API}/lasso/match/field`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ doc_id, key, value, max_window, models_root }),
+    body: JSON.stringify({ doc_id, key, value, max_window, models, wait_heavy }),
   });
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
 
-/* ---------- Ground-truth (human-in-the-loop) ---------- */
+// --- add these two helpers (new) ---
+export async function readGT(doc_id: string): Promise<{doc_id:string; gt: Record<string, any>}> {
+  const r = await fetch(`${API}/lasso/gt/${doc_id}`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
 
+export async function saveGT(params: {
+  doc_id: string;
+  key: string;
+  value?: string;
+  rect?: { page:number;x0:number;y0:number;x1:number;y1:number };
+  user?: string;
+  ts?: string;
+}): Promise<{ok: true; doc_id: string; key: string}> {
+  const r = await fetch(`${API}/lasso/gt/save`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+/* ---------- Ground-truth (human-in-the-loop) ---------- */
+// --- add these two helpers (new) ---
+export async function readGT(doc_id: string): Promise<{doc_id:string; gt: Record<string, any>}> {
+  const r = await fetch(`${API}/lasso/gt/${doc_id}`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function saveGT(params: {
+  doc_id: string;
+  key: string;
+  value?: string;
+  rect?: { page:number;x0:number;y0:number;x1:number;y1:number };
+  user?: string;
+  ts?: string;
+}): Promise<{ok: true; doc_id: string; key: string}> {
+  const r = await fetch(`${API}/lasso/gt/save`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
 /** Save/overwrite ground truth for one field (and get per-model IoU back) */
 export async function saveGroundTruth(params: {
   doc_id: string;
