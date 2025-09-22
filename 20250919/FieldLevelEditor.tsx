@@ -261,6 +261,31 @@ async function postGT(payload: {
   return r.json() as Promise<{ ok: true; doc_id: string; key: string }>;
 }
 
+type MethodKey = "fuzzy" | "tfidf" | "minilm" | "distilbert" | "layoutlmv3";
+
+function toOverlay(
+  label: MethodKey,
+  color: string,
+  m?: MatchRect | null
+): {label:string;color:string;rect:EditRect|null} {
+  return m && (m as any).rect
+    ? { label, color, rect: { page: m.page, x0: m.rect.x0, y0: m.rect.y0, x1: m.rect.x1, y1: m.rect.y1 } }
+    : { label, color, rect: null };
+}
+
+function mergeOverlays(
+  cur: { label:string;color:string;rect:EditRect|null }[],
+  patch: Partial<Record<MethodKey, MatchRect | null>>,
+  COLORS: Record<string,string>
+) {
+  const map = new Map(cur.map(o => [o.label as MethodKey, o]));
+  (["fuzzy","tfidf","minilm","distilbert","layoutlmv3"] as MethodKey[]).forEach(k => {
+    if (k in patch) map.set(k, toOverlay(k, COLORS[k], patch[k]));
+  });
+  return Array.from(map.values());
+}
+
+
 /* ========================= Component ========================== */
 
 export default function FieldLevelEditor() {
@@ -370,32 +395,48 @@ export default function FieldLevelEditor() {
     }
 
     // Server 4-method overlays (layoutlmv3 ignored)
-    (async () => {
-      try {
-        if (!docId) return;
-        const res: MatchResp = await matchField(docId, r.key, r.value, 12);
-        const pick = (m: any): EditRect | null =>
-          !m ? null : ({ page: m.page, x0: m.rect.x0, y0: m.rect.y0, x1: m.rect.x1, y1: m.rect.y1 });
-        const ovs = (["fuzzy","tfidf","minilm","distilbert"] as const).map((k) => ({
-          label: k,
-          color: COLORS[k],
-          rect: pick((res as any).methods?.[k]),
-        }));
-        // if we still don't have a page/rect, pick first available overlay
-        if (!rect) {
-          const first = ovs.find(o => o.rect);
-          if (first?.rect?.page) setPage(first.rect.page);
-        }
-        setOverlays(ovs);
-      } catch (e) {
-        console.warn("matchField failed", e);
-        setOverlays([]);
-      } finally {
-        setLoadingBoxes(false);
-      }
-    })();
-  }
+    // D) Server overlays: FAST first (fuzzy/tfidf), then HEAVY (minilm/distilbert)
+(async () => {
+  try {
+    if (!docId) return;
+    setLoadingBoxes(true);
 
+    // 1) FAST — quick boxes shown immediately
+    const fast = await matchField(docId, r.key, r.value, { max_window: 12, fast_only: true });
+
+    const fastOverlays = mergeOverlays(
+      [],
+      {
+        fuzzy: fast?.methods?.fuzzy ?? null,
+        tfidf: fast?.methods?.tfidf ?? null,
+      },
+      COLORS
+    );
+
+    if (!rect) {
+      const pg = fastOverlays.find(o => o.rect)?.rect?.page;
+      if (pg) setPage(pg);
+    }
+    setOverlays(fastOverlays);
+
+    // 2) HEAVY — compute in background and merge when ready
+    matchField(docId, r.key, r.value, { max_window: 12 })
+      .then(all => {
+        const heavy = {
+          minilm: all?.methods?.minilm ?? null,
+          distilbert: all?.methods?.distilbert ?? null,
+          // keep or drop this line depending on server setting
+          layoutlmv3: all?.methods?.layoutlmv3 ?? null,
+        };
+        setOverlays(prev => mergeOverlays(prev, heavy, COLORS));
+      })
+      .catch(err => console.warn("heavy matchField failed", err))
+      .finally(() => setLoadingBoxes(false));
+  } catch (e) {
+    console.warn("fast matchField failed", e);
+    setLoadingBoxes(false);
+  }
+})();
   /* -------- Lasso/move/resize → OCR preview + optional left-table update -------- */
   async function onRectCommitted(rr: EditRect) {
     if (!focusedKey) return;
