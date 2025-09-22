@@ -1,578 +1,221 @@
-// File: src/tsp4/components/lasso/FieldLevelEditor.tsx
 import React, { useEffect, useMemo, useState } from "react";
-import PdfEditCanvas, { type EditRect, type TokenBox } from "./PdfEditCanvas";
+import "../../assets/stylesheets/lasso.css"; // your local CSS (avoid pdfjs css)
+import PdfEditCanvas, { type EditRect, type TokenBox, type OverlayRect } from "./PdfEditCanvas";
+import { API, getMeta, getBoxes, matchField, saveGT, type Box as TBox } from "../../../lib/api";
 
-// CSS
-import "../ocr.css";
-// If you renamed / moved, use your path instead (uncomment and fix):
-// import "../../../assets/stylesheets/lasso.css";
-
-import {
-  API,
-  uploadPdf,
-  getMeta,
-  getBoxes,
-  docIdFromUrl,
-  ocrPreview,
-  // distilExtract, // optional; not required for this screen
-  // type DistilField,
-  matchField,
-  type MatchResp,
-} from "../../../lib/api";
-
-/* ========================= Types & Helpers ========================== */
-type KVRect = { page: number; x0: number; y0: number; x1: number; y1: number };
-type AnyJson = Record<string, any>;
-type FieldRow = { key: string; value: string; rects?: KVRect[] };
+type KVRect = { page:number;x0:number;y0:number;x1:number;y1:number };
+type FieldRow = { key:string; value:string; rects?:KVRect[] };
 
 const COLORS: Record<string,string> = {
-  fuzzy: "#22c55e",      // green
-  tfidf: "#3b82f6",      // blue
-  minilm: "#a855f7",     // purple
-  distilbert: "#facc15", // yellow (avoid confusion with pink)
+  fuzzy:"#22c55e", tfidf:"#3b82f6", minilm:"#a855f7", distilbert:"#f59e0b"
 };
-
-const ABBREV: Record<string, string> = {
-  rd: "road", "rd.": "road",
-  ave: "avenue", "ave.": "avenue", av: "avenue",
-  st: "street", "st.": "street",
-  blvd: "boulevard", "blvd.": "boulevard",
-  dr: "drive", "dr.": "drive",
-  ln: "lane", "ln.": "lane",
-  hwy: "highway", "hwy.": "highway",
-  ct: "court", "ct.": "court",
-};
-
-const norm = (s: string) =>
-  (s || "")
-    .toLowerCase()
-    .normalize("NFKC")
-    .replace(/[\u00A0]/g, " ")
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-const normNum = (s: string) =>
-  (s || "").toLowerCase().normalize("NFKC").replace(/[,$]/g, "").replace(/\s+/g, " ").trim();
-
-function levRatio(a: string, b: string): number {
-  const m = a.length, n = b.length;
-  if (!m && !n) return 1;
-  const dp: number[] = new Array(n + 1);
-  for (let j = 0; j <= n; j++) dp[j] = j;
-  for (let i = 1; i <= m; i++) {
-    let prev = dp[0];
-    dp[0] = i;
-    for (let j = 1; j <= n; j++) {
-      const tmp = dp[j];
-      dp[j] = Math.min(dp[j] + 1, dp[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
-      prev = tmp;
-    }
-  }
-  return 1 - dp[n] / Math.max(1, Math.max(m, n));
-}
 
 function unionRect(span: TokenBox[]) {
-  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  for (const t of span) {
-    x0 = Math.min(x0, t.x0);
-    y0 = Math.min(y0, t.y0);
-    x1 = Math.max(x1, t.x1);
-    y1 = Math.max(y1, t.y1);
-  }
-  return { x0: Math.floor(x0), y0: Math.floor(y0), x1: Math.ceil(x1), y1: Math.ceil(y1) };
+  let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+  for(const t of span){ x0=Math.min(x0,t.x0); y0=Math.min(y0,t.y0); x1=Math.max(x1,t.x1); y1=Math.max(y1,t.y1); }
+  return { x0:Math.floor(x0),y0:Math.floor(y0),x1:Math.ceil(x1),y1:Math.ceil(y1) };
 }
-function linePenalty(span: TokenBox[]) {
-  if (span.length <= 1) return 0;
-  const ys = span.map((t) => (t.y0 + t.y1) / 2).sort((a, b) => a - b);
-  const spread = ys[ys.length - 1] - ys[0];
-  const hs = span.map((t) => t.y1 - t.y0);
-  const avg = hs.reduce((a, b) => a + b, 0) / Math.max(1, hs.length);
-  return Math.max(0, spread - avg * 0.6) / Math.max(1, avg);
-}
-
-/** Local fuzzy by value (immediate visual fallback) */
-function autoLocateByValue(valueRaw: string, allTokens: TokenBox[], maxWindow = 16) {
-  const raw = (valueRaw || "").trim();
-  if (!raw) return null;
-
-  const looksNumeric = /^[\s\-$€£₹,.\d/]+$/.test(raw);
-  const words = looksNumeric
-    ? [normNum(raw)]
-    : norm(raw).split(" ").map((w) => ABBREV[w] ?? w);
-
-  const byPage = new Map<number, TokenBox[]>();
-  for (const t of allTokens) {
-    (byPage.get(t.page) || byPage.set(t.page, []).get(t.page)!).push(t);
-  }
-  byPage.forEach((arr) =>
-    arr.sort((a, b) => (a.y0 === b.y0 ? a.x0 - b.x0 : a.y0 - b.y0))
-  );
-
-  let best: { score: number; page: number; span: TokenBox[] } | null = null;
-
-  function scoreSpan(span: TokenBox[]) {
-    const txt = span
-      .map((t) => (t.text || ""))
-      .join(" ")
-      .toLowerCase()
-      .normalize("NFKC")
-      .replace(/[^\p{L}\p{N}\s]/gu, " ");
-    const spanWords = txt.split(/\s+/).filter(Boolean).map((w) => ABBREV[w] ?? w);
-
-    if (looksNumeric) {
-      const fuzz = levRatio(spanWords.join(" "), words.join(" "));
-      return fuzz - Math.min(0.25, linePenalty(span) * 0.12);
-    }
-
-    let covered = 0;
-    let j = 0;
-    for (let i = 0; i < words.length && j < spanWords.length; ) {
-      if (words[i] === spanWords[j] || levRatio(words[i], spanWords[j]) >= 0.8) {
-        covered++;
-        i++;
-        j++;
-      } else {
-        j++;
-      }
-    }
-    const coverage = covered / Math.max(1, words.length);
-    const fuzz = levRatio(spanWords.join(" "), words.join(" "));
-    return coverage * 0.75 + fuzz * 0.35 - Math.min(0.25, linePenalty(span) * 0.12);
-  }
-
-  byPage.forEach((toks, pg) => {
-    const n = toks.length;
-    for (let i = 0; i < n; i++) {
-      const span: TokenBox[] = [];
-      for (let w = 0; w < maxWindow && i + w < n; w++) {
-        const t = toks[i + w];
-        const token = (t.text || "").trim();
-        if (!token) continue;
-        span.push(t);
-
-        if (span.length === 1 && !looksNumeric) {
-          const first = words[0];
-          const tokenN = token.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, "");
-          if (levRatio(first, tokenN) < 0.6) continue;
-        }
-
-        const s = scoreSpan(span);
-        if (!best || s > best.score) best = { score: s, page: pg, span: [...span] };
-      }
-    }
-  });
-
-  if (!best) return null;
-  const rect = unionRect(best.span);
-  return { page: best.page, rect, score: best.score };
-}
-
-/** Token refinement (shrink to tokens inside union) */
-function refineWithTokens(
-  union: { page: number; x0: number; y0: number; x1: number; y1: number },
-  pageTokens: TokenBox[]
-) {
-  const inBox = (t: TokenBox) => {
-    const cx = (t.x0 + t.x1) / 2, cy = (t.y0 + t.y1) / 2;
-    const minx = Math.min(union.x0, union.x1), maxx = Math.max(union.x0, union.x1);
-    const miny = Math.min(union.y0, union.y1), maxy = Math.max(union.y0, union.y1);
-    return cx >= minx && cx <= maxx && cy >= miny && cy <= maxy;
-  };
-  const pool = pageTokens.filter(inBox);
-  if (!pool.length) return union;
-  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  for (const t of pool) {
-    x0 = Math.min(x0, t.x0); y0 = Math.min(y0, t.y0);
-    x1 = Math.max(x1, t.x1); y1 = Math.max(y1, t.y1);
-  }
-  return { page: union.page, x0, y0, x1, y1 };
-}
-
-/* Flatten ECM-like JSON to rows */
-function normalizeRects(x: any): KVRect[] | undefined {
-  if (!x) return undefined;
-  const arr = Array.isArray(x) ? x : [x];
-  const out: KVRect[] = [];
-  for (const b of arr) {
-    if (b && Number.isFinite(+b.page)) {
-      if (b.x != null && b.y != null && b.w != null && b.h != null) {
-        out.push({ page: +b.page, x0: +b.x, y0: +b.y, x1: +b.x + +b.w, y1: +b.y + +b.h });
-      } else {
-        out.push({ page: +b.page, x0: +b.x0, y0: +b.y0, x1: +b.x1, y1: +b.y1 });
-      }
-    }
-  }
-  return out.length ? out : undefined;
-}
-function tryStr(v: any) { try { return typeof v === "string" ? v : JSON.stringify(v); } catch { return String(v); } }
-type FlatKV = { key: string; value: string; rects?: KVRect[] };
-function flattenJson(obj: any, prefix = ""): FlatKV[] {
-  const rows: FlatKV[] = [];
-  const push = (k: string, v: any) => rows.push({ key: k, value: v == null ? "" : String(v) });
-  if (obj === null || obj === undefined) return [{ key: prefix || "(null)", value: "" }];
-
-  if (Array.isArray(obj)) {
-    obj.forEach((v, i) => {
-      const path = prefix ? `${prefix}[${i}]` : `[${i}]`;
-      if (typeof v === "object" && v !== null) rows.push(...flattenJson(v, path));
-      else push(path, v);
-    });
-    return rows;
-  }
-  if (typeof obj !== "object") return [{ key: prefix || "(value)", value: String(obj) }];
-
-  for (const k of Object.keys(obj)) {
-    const path = prefix ? `${prefix}.${k}` : k;
-    const v = obj[k];
-    if (v && typeof v === "object" && !Array.isArray(v)) {
-      const rects = normalizeRects(v.bboxes || v.boxes || v.bbox || v.rects);
-      if ("value" in v || rects) {
-        rows.push({ key: path, value: "value" in v ? String(v.value ?? "") : tryStr(v), rects });
-      } else {
-        rows.push(...flattenJson(v, path));
-      }
-    } else if (Array.isArray(v)) {
-      rows.push(...flattenJson(v, path));
-    } else {
-      push(path, v);
-    }
-  }
-  return rows;
-}
-
-/* ------------------ local helpers for GT ------------------ */
-async function fetchGT(doc_id: string) {
-  const r = await fetch(`${API}/lasso/gt/${doc_id}`);
-  if (!r.ok) throw new Error(await r.text());
-  return r.json() as Promise<{ doc_id: string; gt: Record<string, any> }>;
-}
-async function postGT(payload: {
-  doc_id: string; key: string;
-  rect?: { page:number;x0:number;y0:number;x1:number;y1:number };
-  value?: string; user?: string; ts?: string;
-}) {
-  const r = await fetch(`${API}/lasso/gt/save`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json() as Promise<{ ok: true; doc_id: string; key: string }>;
-}
-
-type MethodKey = "fuzzy" | "tfidf" | "minilm" | "distilbert" | "layoutlmv3";
-
-function toOverlay(
-  label: MethodKey,
-  color: string,
-  m?: MatchRect | null
-): {label:string;color:string;rect:EditRect|null} {
-  return m && (m as any).rect
-    ? { label, color, rect: { page: m.page, x0: m.rect.x0, y0: m.rect.y0, x1: m.rect.x1, y1: m.rect.y1 } }
-    : { label, color, rect: null };
-}
-
-function mergeOverlays(
-  cur: { label:string;color:string;rect:EditRect|null }[],
-  patch: Partial<Record<MethodKey, MatchRect | null>>,
-  COLORS: Record<string,string>
-) {
-  const map = new Map(cur.map(o => [o.label as MethodKey, o]));
-  (["fuzzy","tfidf","minilm","distilbert","layoutlmv3"] as MethodKey[]).forEach(k => {
-    if (k in patch) map.set(k, toOverlay(k, COLORS[k], patch[k]));
-  });
-  return Array.from(map.values());
-}
-
-
-/* ========================= Component ========================== */
 
 export default function FieldLevelEditor() {
-  // doc + page
-  const [docUrl, setDocUrl] = useState("");
-  const [docId, setDocId] = useState("");
-  const [meta, setMeta] = useState<{ w: number; h: number }[]>([]);
-  const [page, setPage] = useState(1);
-
-  // tokens (orange)
-  const [tokens, setTokens] = useState<TokenBox[]>([]);
-  const tokensPage = useMemo(() => tokens.filter((t) => t.page === page), [tokens, page]);
-
-  // left table (extraction)
-  const [rows, setRows] = useState<FieldRow[]>([]);
-  const [focusedKey, setFocusedKey] = useState("");
-
+  // doc
+  const [docUrl,setDocUrl]=useState("");
+  const [docId,setDocId]=useState("");
+  const [meta,setMeta]=useState<{w:number;h:number}[]>([]);
+  const [page,setPage]=useState(1);
+  // tokens
+  const [tokens,setTokens]=useState<TokenBox[]>([]);
+  const tokensPage = useMemo(()=>tokens.filter(t=>t.page===page),[tokens,page]);
+  // kv
+  const [rows,setRows]=useState<FieldRow[]>([]);
+  const [focusedKey,setFocusedKey]=useState("");
   // overlays
-  const [rect, setRect] = useState<EditRect | null>(null);
-  const [overlays, setOverlays] = useState<{label:string;color:string;rect:EditRect|null}[]>([]);
-  const [showBoxes, setShowBoxes] = useState(false);
+  const [rect,setRect]=useState<EditRect|null>(null);
+  const [overlays,setOverlays]=useState<OverlayRect[]>([]);
+  const [showBoxes,setShowBoxes]=useState(false);
+  const [editValue,setEditValue]=useState(false);
+  const [zoom,setZoom]=useState(1);
 
-  // optional zoom
-  const [zoom, setZoom] = useState(1);
+  const [loadingFast,setLoadingFast]=useState(false);
+  const [loadingHeavy,setLoadingHeavy]=useState(false);
 
-  // ground truth store (loaded/saved per doc)
-  const [gt, setGT] = useState<Record<string, any>>({});
+  // helpers
+  const serverW = meta[page-1]?.w || 1;
+  const serverH = meta[page-1]?.h || 1;
 
-  // UX
-  const [editValue, setEditValue] = useState(false);
-  const [loadingBoxes, setLoadingBoxes] = useState(false);
-
-  /* -------- Uploads -------- */
-  async function onUploadPdf(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    try {
-      const res = await uploadPdf(f);
-      setDocId(res.doc_id);
-      setDocUrl(res.annotated_tokens_url);
-      const m = await getMeta(res.doc_id);
-      setMeta(m.pages.map((p) => ({ w: p.width, h: p.height })));
-      setTokens((await getBoxes(res.doc_id)) as any);
-      setPage(1);
-      setRect(null);
-      setOverlays([]);
-      try {
-        const g = await fetchGT(res.doc_id);
-        setGT(g.gt || {});
-      } catch { setGT({}); }
-    } finally {
-      (e.target as HTMLInputElement).value = "";
-    }
-  }
-
-  async function onUploadEcm(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    try {
-      const parsed = JSON.parse(await f.text()) as AnyJson;
-      const flat = flattenJson(parsed);
-      const fr: FieldRow[] = flat.map((kv) => ({ key: kv.key, value: kv.value, rects: kv.rects }));
-      setRows(fr);
-      setFocusedKey("");
-      setRect(null);
-      setOverlays([]);
-    } catch {
-      alert("Invalid ECM JSON");
-    } finally {
-      (e.target as HTMLInputElement).value = "";
-    }
-  }
-
-  /* -------- Paste /data/{doc}/original.pdf -------- */
-  useEffect(() => {
-    const id = docIdFromUrl(docUrl);
-    if (!id) return;
-    (async () => {
+  // Load from pasted /data/{doc}/original.pdf
+  useEffect(()=>{
+    const m=docUrl.match(/\/data\/([A-Za-z0-9_-]+)\/original\.pdf/i);
+    const id = m ? m[1] : "";
+    if(!id) return;
+    (async()=>{
       setDocId(id);
       const m = await getMeta(id);
-      setMeta(m.pages.map((p) => ({ w: p.width, h: p.height })));
+      setMeta(m.pages.map(p=>({w:p.width,h:p.height})));
       setTokens((await getBoxes(id)) as any);
-      setPage(1);
-      setRect(null);
-      setOverlays([]);
-      try {
-        const g = await fetchGT(id);
-        setGT(g.gt || {});
-      } catch { setGT({}); }
+      setPage(1); setRect(null); setOverlays([]);
     })();
-  }, [docUrl]);
+  },[docUrl]);
 
-  /* -------- Row click: local fuzzy → server match → overlays -------- */
-  function onRowClick(r: FieldRow) {
+  function mapOverlays(methods:Record<string, any>): OverlayRect[] {
+    const pick = (m:any): EditRect|null => m && m.rect ? ({ page:m.page, x0:m.rect.x0, y0:m.rect.y0, x1:m.rect.x1, y1:m.rect.y1 }) : null;
+    return (["fuzzy","tfidf","minilm","distilbert"] as const).map(k => ({
+      label: k, color: COLORS[k], rect: pick(methods?.[k])
+    }));
+  }
+
+  async function onRowClick(r: FieldRow) {
+    if(!docId) return;
     setFocusedKey(r.key);
-    setOverlays([]);
-    setLoadingBoxes(true);
+    setOverlays([]); setLoadingFast(true); setLoadingHeavy(false);
 
-    // Local fuzzy fallback (instant visual)
-    const hit = autoLocateByValue(r.value, tokens);
-    if (hit) {
-      const refined = refineWithTokens({ page: hit.page, ...hit.rect }, tokens.filter((t) => t.page === hit.page));
-      setPage(hit.page);
-      setRect(refined);
-    } else {
-      setRect(null);
-    }
+    // FAST first (fuzzy/tfidf)
+    try{
+      const fast = await matchField(docId, r.key, r.value, 12, undefined, true);
+      const ovs = mapOverlays(fast.methods||{});
+      setOverlays(ovs);
+      const firstPg = ovs.find(o=>o.rect)?.rect?.page;
+      if(firstPg) setPage(firstPg);
+    }catch(e){ console.warn("FAST locate failed", e); }
+    finally{ setLoadingFast(false); }
 
-    // Server 4-method overlays (layoutlmv3 ignored)
-    // D) Server overlays: FAST first (fuzzy/tfidf), then HEAVY (minilm/distilbert)
-(async () => {
-  try {
-    if (!docId) return;
-    setLoadingBoxes(true);
-
-    // 1) FAST — quick boxes shown immediately
-    const fast = await matchField(docId, r.key, r.value, { max_window: 12, fast_only: true });
-
-    const fastOverlays = mergeOverlays(
-      [],
-      {
-        fuzzy: fast?.methods?.fuzzy ?? null,
-        tfidf: fast?.methods?.tfidf ?? null,
-      },
-      COLORS
-    );
-
-    if (!rect) {
-      const pg = fastOverlays.find(o => o.rect)?.rect?.page;
-      if (pg) setPage(pg);
-    }
-    setOverlays(fastOverlays);
-
-    // 2) HEAVY — compute in background and merge when ready
-    matchField(docId, r.key, r.value, { max_window: 12 })
-      .then(all => {
-        const heavy = {
-          minilm: all?.methods?.minilm ?? null,
-          distilbert: all?.methods?.distilbert ?? null,
-          // keep or drop this line depending on server setting
-          layoutlmv3: all?.methods?.layoutlmv3 ?? null,
-        };
-        setOverlays(prev => mergeOverlays(prev, heavy, COLORS));
+    // HEAVY in the background (minilm/distilbert)
+    setLoadingHeavy(true);
+    matchField(docId, r.key, r.value, 12)
+      .then((all)=>{
+        const merged = mapOverlays(all.methods||{});
+        setOverlays(merged);
       })
-      .catch(err => console.warn("heavy matchField failed", err))
-      .finally(() => setLoadingBoxes(false));
-  } catch (e) {
-    console.warn("fast matchField failed", e);
-    setLoadingBoxes(false);
+      .catch((e)=>console.warn("HEAVY locate failed", e))
+      .finally(()=>setLoadingHeavy(false));
   }
-})();
-  /* -------- Lasso/move/resize → OCR preview + optional left-table update -------- */
+
   async function onRectCommitted(rr: EditRect) {
-    if (!focusedKey) return;
-    try {
-      if (docId) {
-        const res = await ocrPreview(docId, rr.page, rr);
-        const text = (res?.text || "").trim();
-
-        setRect(rr);
-
-        if (editValue) {
-          // Update KV list inline for the focused key
-          setRows((prev) =>
-            prev.map((row) =>
-              row.key === focusedKey
-                ? { ...row, value: text, rects: [{ page: rr.page, x0: rr.x0, y0: rr.y0, x1: rr.x1, y1: rr.y1 }] }
-                : row
-            )
-          );
-        }
-      }
-    } catch {
-      /* preview best-effort */
+    if(!focusedKey) return;
+    // Update KV rect inline
+    setRows(prev => prev.map(row => row.key===focusedKey ? ({...row, rects:[{page:rr.page,x0:rr.x0,y0:rr.y0,x1:rr.x1,y1:rr.y1}]}) : row));
+    if(editValue){
+      // Optional: on commit, you can OCR on server and update row.value.
+      // If you already have /lasso/lasso OCR preview, call it here. For now leave as rect-only editing.
     }
   }
 
-  const serverW = meta[page - 1]?.w || 1;
-  const serverH = meta[page - 1]?.h || 1;
+  async function onSaveGT(){
+    if(!focusedKey || !rect || !docId) return;
+    try{
+      const preds: Record<string, any> = {};
+      for(const o of overlays){
+        preds[o.label] = o.rect ? { page:o.rect.page, rect:{x0:o.rect.x0,y0:o.rect.y0,x1:o.rect.x1,y1:o.rect.y1}, score:0 } : null;
+      }
+      const row = rows.find(r=>r.key===focusedKey)!;
+      const res = await saveGT({
+        doc_id: docId,
+        key: focusedKey,
+        value: row?.value || "",
+        rect: { page: rect.page, x0: rect.x0, y0: rect.y0, x1: rect.x1, y1: rect.y1 },
+        preds
+      });
+      console.log("GT saved", res);
+      alert("Saved ground truth.\nIoU:\n" + JSON.stringify(res?.report || {}, null, 2));
+    }catch(e:any){
+      alert("Save GT failed: " + (e?.message || String(e)));
+    }
+  }
 
-  /* ========================= Render ========================== */
+  // Minimal KV table from uploaded ECM JSON
+  async function onUploadEcm(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0]; if(!f) return;
+    try{
+      const parsed = JSON.parse(await f.text()) as Record<string, any>;
+      const flat: FieldRow[] = [];
+      const stack = (o:any, prefix="")=>{
+        if(o===null||o===undefined) return;
+        if(Array.isArray(o)){
+          o.forEach((v,i)=>stack(v, `${prefix}[${i}]`)); return;
+        }
+        if(typeof o==="object"){
+          for(const k of Object.keys(o)){
+            const path = prefix ? `${prefix}.${k}` : k;
+            const v = (o as any)[k];
+            if(v && typeof v==="object" && !Array.isArray(v)){
+              if("value" in v || "rects" in v || "bboxes" in v || "bbox" in v){
+                const rects = (v.rects||v.bboxes||v.bbox) as any[]|undefined;
+                flat.push({ key:path, value:String(v.value ?? ""), rects:rects?.map((b:any)=>({page:+b.page,x0:+b.x0,y0:+b.y0,x1:+b.x1,y1:+b.y1})) });
+              }else stack(v, path);
+            }else{
+              flat.push({ key:path, value: v==null ? "" : String(v) });
+            }
+          }
+          return;
+        }
+        flat.push({ key: prefix||"(value)", value: String(o) });
+      };
+      stack(parsed, "");
+      setRows(flat);
+      setFocusedKey(""); setRect(null); setOverlays([]);
+    }catch{ alert("Invalid ECM JSON"); }
+    finally{ (e.target as HTMLInputElement).value=""; }
+  }
 
   return (
     <div className="workbench">
-      <div className="wb-toolbar" style={{ gap: 8 }}>
-        <span style={{ fontWeight: 600 }}>Choose:</span>
+      <div className="wb-toolbar">
+        <span style={{fontWeight:600}}>Choose:</span>
 
-        <label className="btn">
-          <input type="file" accept="application/pdf" onChange={onUploadPdf} style={{ display: "none" }} />
-          PDF
+        <label className="btn"><input type="file" accept="application/json" onChange={onUploadEcm} style={{display:"none"}}/>ECM JSON</label>
+
+        <input className="input" placeholder="...or paste http://localhost:8080/data/{doc_id}/original.pdf"
+               value={docUrl} onChange={e=>setDocUrl(e.target.value)} style={{minWidth:380,marginLeft:8}}/>
+
+        <label className={showBoxes ? "btn toggle active":"btn toggle"} style={{marginLeft:8}}>
+          <input type="checkbox" checked={showBoxes} onChange={()=>setShowBoxes(v=>!v)} /> Boxes
         </label>
 
-        <label className="btn">
-          <input type="file" accept="application/json" onChange={onUploadEcm} style={{ display: "none" }} />
-          ECM JSON
+        <label className={editValue ? "btn toggle active":"btn toggle"} style={{marginLeft:8}}>
+          <input type="checkbox" checked={editValue} onChange={()=>setEditValue(v=>!v)} /> Edit Value
         </label>
 
-        <input
-          className="input"
-          placeholder="...or paste /data/{doc_id}/original.pdf"
-          value={docUrl}
-          onChange={(e) => setDocUrl(e.target.value || "")}
-          style={{ marginLeft: 8, minWidth: 360 }}
-        />
-
-        <label className={showBoxes ? "btn toggle active" : "btn toggle"} style={{ marginLeft: 8 }}>
-          <input type="checkbox" checked={showBoxes} onChange={() => setShowBoxes((v) => !v)} /> Boxes
-        </label>
-
-        <label className={editValue ? "btn toggle active" : "btn toggle"} style={{ marginLeft: 8 }}>
-          <input type="checkbox" checked={editValue} onChange={() => setEditValue(v => !v)} /> Edit value
-        </label>
-
-        <button
-          onClick={async () => {
-            if (!focusedKey || !rect || !docId) return;
-            try {
-              // Save GT rectangle
-              await postGT({
-                doc_id: docId,
-                key: focusedKey,
-                rect: { page: rect.page, x0: rect.x0, y0: rect.y0, x1: rect.x1, y1: rect.y1 },
-              });
-              // Optionally persist current value if editValue is ON
-              if (editValue) {
-                const cur = rows.find(x => x.key === focusedKey);
-                await postGT({ doc_id: docId, key: focusedKey, value: cur?.value ?? "" });
-              }
-              const g = await fetchGT(docId);
-              setGT(g.gt || {});
-            } catch (e) {
-              alert("Failed to save ground truth");
-            }
-          }}
-          disabled={!focusedKey || !rect || !docId}
-        >
-          Save GT
-        </button>
+        <button className="btn" onClick={onSaveGT} disabled={!rect || !focusedKey}>Save GT</button>
 
         <span className="spacer" />
 
-        <div className="toolbar-inline" style={{ gap: 6 }}>
-          {Object.entries(COLORS).map(([k, c]) => (
-            <span key={k} style={{ display:"inline-flex", alignItems:"center", gap:6, fontSize:12 }}>
-              <span style={{ width:12, height:12, background:c, border:`1px solid ${c}`, display:"inline-block", opacity:0.7 }} />
+        <div className="toolbar-inline" style={{gap:6}}>
+          {Object.entries(COLORS).map(([k,c])=>(
+            <span key={k} style={{display:"inline-flex",alignItems:"center",gap:6,fontSize:12}}>
+              <span style={{width:12,height:12,background:c,border:`1px solid ${c}`,display:"inline-block",opacity:0.7}}/>
               {k}
             </span>
           ))}
-          {loadingBoxes ? <span className="muted" style={{marginLeft:10}}>loading boxes…</span> : null}
         </div>
 
         <span className="spacer" />
 
-        <div className="toolbar-inline" style={{ gap: 4 }}>
-          <button onClick={() => setZoom((z) => Math.max(0.5, Math.round((z - 0.1) * 10) / 10))}>–</button>
-          <span style={{ width: 44, textAlign: "center" }}>{Math.round(zoom * 100)}%</span>
-          <button onClick={() => setZoom((z) => Math.min(3, Math.round((z + 0.1) * 10) / 10))}>+</button>
-          <button onClick={() => setZoom(1)}>Reset</button>
+        <div className="toolbar-inline" style={{gap:4}}>
+          <button onClick={()=>setZoom(z=>Math.max(0.5, Math.round((z-0.1)*10)/10))}>–</button>
+          <span style={{width:44,textAlign:"center"}}>{Math.round(zoom*100)}%</span>
+          <button onClick={()=>setZoom(z=>Math.min(3, Math.round((z+0.1)*10)/10))}>+</button>
+          <button onClick={()=>setZoom(1)}>Reset</button>
         </div>
 
-        <span className="muted" style={{ marginLeft: 12 }}>API: {API}</span>
+        <span className="muted" style={{marginLeft:12}}>API: {API}</span>
       </div>
 
-      <div className="wb-split" style={{ display: "flex", gap: 12 }}>
-        {/* LEFT 30% — KV table */}
-        <div className="wb-left" style={{ flexBasis: "30%", flexGrow: 0, flexShrink: 0, overflow: "auto" }}>
+      <div className="wb-split" style={{display:"flex",gap:12}}>
+        {/* LEFT: KV */}
+        <div className="wb-left">
           <div className="section-title">Extraction</div>
           {!rows.length ? (
             <div className="placeholder">Upload ECM JSON to see fields.</div>
           ) : (
             <table>
-              <thead>
-                <tr><th style={{ width: "42%" }}>Key</th><th>Value</th></tr>
-              </thead>
+              <thead><tr><th style={{width:"42%"}}>Key</th><th>Value</th></tr></thead>
               <tbody>
-                {rows.map((r, i) => {
-                  const focused = r.key === focusedKey;
+                {rows.map((r,i)=>{
+                  const focused = r.key===focusedKey;
                   return (
-                    <tr
-                      key={r.key + ":" + i}
-                      onClick={() => onRowClick(r)}
-                      style={focused ? { outline: "2px solid #ec4899", outlineOffset: -2 } : undefined}
-                    >
+                    <tr key={r.key+":"+i} onClick={()=>onRowClick(r)}
+                        style={focused ? { outline:"2px solid #00b4ff", outlineOffset:-2 } : undefined}>
                       <td><code>{r.key}</code></td>
-                      <td style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                        {r.value}
-                      </td>
+                      <td style={{whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.value}</td>
                     </tr>
                   );
                 })}
@@ -581,14 +224,21 @@ export default function FieldLevelEditor() {
           )}
         </div>
 
-        {/* RIGHT 70% — PDF */}
-        <div className="wb-right" style={{ flexBasis: "70%", overflow: "auto" }}>
-          {docUrl ? (
+        {/* RIGHT: PDF */}
+        <div className="wb-right">
+          {!docUrl ? (
+            <div className="placeholder">Upload a PDF (in data/) and paste its URL above to begin.</div>
+          ) : (
             <>
               <div className="toolbar-inline">
-                <button disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>Prev</button>
-                <span className="page-indicator">Page {page} {meta.length ? `/ ${meta.length}` : ""}</span>
-                <button disabled={meta.length > 0 && page >= meta.length} onClick={() => setPage((p) => p + 1)}>Next</button>
+                <button disabled={page<=1} onClick={()=>setPage(p=>p-1)}>Prev</button>
+                <span className="page-indicator">Page {page} {meta.length? `/ ${meta.length}`:""}</span>
+                <button disabled={meta.length>0 && page>=meta.length} onClick={()=>setPage(p=>p+1)}>Next</button>
+                {(loadingFast || loadingHeavy) && (
+                  <span className="muted" style={{marginLeft:8}}>
+                    {loadingFast ? "loading: fuzzy/tfidf…" : loadingHeavy ? "loading: minilm/distilbert…" : ""}
+                  </span>
+                )}
               </div>
               <PdfEditCanvas
                 docUrl={docUrl}
@@ -605,8 +255,6 @@ export default function FieldLevelEditor() {
                 zoom={zoom}
               />
             </>
-          ) : (
-            <div className="placeholder">Upload a PDF to begin.</div>
           )}
         </div>
       </div>
