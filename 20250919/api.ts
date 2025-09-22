@@ -293,3 +293,36 @@ export async function locateField(params: {
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
+
+//20250923
+
+// ---- Put this in src/lib/api.ts (replace the old matchField) ----
+type MatchFieldOpts = {
+  max_window?: number;
+  models_root?: string;
+  fast_only?: boolean; // ask server to return only fuzzy+tfidf
+};
+
+export async function matchField(
+  doc_id: string,
+  key: string,
+  value: string,
+  opts: MatchFieldOpts = {}
+): Promise<MatchResp> {
+  const body = {
+    doc_id,
+    key,
+    value,
+    max_window: opts.max_window ?? 12,
+    models_root: opts.models_root,
+    fast_only: opts.fast_only ?? false,
+  };
+
+  const r = await fetch(`${API}/lasso/match/field`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
