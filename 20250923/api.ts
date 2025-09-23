@@ -1,9 +1,32 @@
-export type MatchOptions = { fast_only?: boolean; max_window?: number; models_root?: string };
-export function matchField(doc_id: string, key: string, value: string, opts?: MatchOptions): Promise<MatchResp>;
+// File: src/lib/api.ts
 
-//long version
+/* ---------------- Base ---------------- */
+const BASE =
+  (import.meta as any).env?.VITE_API_BASE ||
+  (typeof window !== "undefined" && (window as any).__API_BASE__) ||
+  "http://localhost:8080";
 
-/* ---------- Match types ---------- */
+export const API = BASE;
+
+/* ---------------- Types ---------------- */
+export type UploadResp = {
+  doc_id: string;
+  annotated_tokens_url: string;
+  pages: number;
+};
+
+export type MetaResp = {
+  pages: Array<{ page: number; width: number; height: number }>;
+};
+
+export type Box = {
+  page: number;
+  x0: number; y0: number; x1: number; y1: number;
+  text?: string;
+};
+
+export type OcrPreviewResp = { text: string; crop_url?: string };
+
 export type MatchRect = {
   page: number;
   rect: { x0: number; y0: number; x1: number; y1: number };
@@ -11,73 +34,84 @@ export type MatchRect = {
 };
 
 export type MatchResp = {
-  doc_id?: string;
-  key?: string;
-  value?: string;
   methods: {
     fuzzy?: MatchRect | null;
     tfidf?: MatchRect | null;
     minilm?: MatchRect | null;
     distilbert?: MatchRect | null;
-    layoutlmv3?: MatchRect | null; // may be undefined/null if not enabled
   };
 };
 
 export type MatchOptions = {
-  /** only return fuzzy + tfidf when true */
-  fast_only?: boolean;
-  /** sliding window width in tokens (default 12) */
   max_window?: number;
-  /** optional page hint (1-based) */
-  page_hint?: number | null;
-  /** override local models path on server */
-  models_root?: string;
+  fast_only?: boolean;
 };
 
-/* ---------- Match call ---------- */
+/* ---------------- Helpers ---------------- */
+export function docIdFromUrl(url: string): string | null {
+  try {
+    // supports /data/{docId}/original.pdf or a raw docId
+    const m = url.match(/\/data\/([A-Za-z0-9_-]+)\/original\.pdf/i);
+    if (m) return m[1];
+    if (/^[A-Za-z0-9_-]{6,32}$/.test(url)) return url;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function docUrlFromId(doc_id: string): string {
+  return `${API}/data/${doc_id}/original.pdf`;
+}
+
+/* ---------------- Calls ---------------- */
+export async function uploadPdf(file: File): Promise<UploadResp> {
+  const fd = new FormData();
+  fd.append("pdf", file);
+  const r = await fetch(`${API}/lasso/upload`, { method: "POST", body: fd });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function getMeta(doc_id: string): Promise<MetaResp> {
+  const r = await fetch(`${API}/lasso/doc/${doc_id}/meta`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function getBoxes(doc_id: string): Promise<Box[]> {
+  const r = await fetch(`${API}/lasso/doc/${doc_id}/boxes`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function ocrPreview(
+  doc_id: string,
+  page: number,
+  rect: { x0: number; y0: number; x1: number; y1: number }
+): Promise<OcrPreviewResp> {
+  const r = await fetch(`${API}/lasso/lasso`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ doc_id, page, ...rect }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  const j = await r.json();
+  return { text: j?.text || "", crop_url: j?.crop_url };
+}
+
+/** Fast-first matcher (fuzzy immediately, tfidf next). Heavy models omitted server-side. */
 export async function matchField(
   doc_id: string,
   key: string,
   value: string,
-  opts: MatchOptions = {}
+  options?: MatchOptions
 ): Promise<MatchResp> {
-  const body = {
-    doc_id,
-    key,
-    value,
-    page_hint: opts.page_hint ?? null,              // must be null or number
-    max_window: typeof opts.max_window === "number" ? opts.max_window : 12,
-    fast_only: !!opts.fast_only,                    // boolean required by server model
-    models_root: opts.models_root ?? undefined,     // omit if not provided
-  };
-
   const r = await fetch(`${API}/lasso/match/field`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ doc_id, key, value, options }),
   });
-
-  if (!r.ok) {
-    // Helpful error surface for 422s
-    const txt = await r.text();
-    throw new Error(`matchField ${r.status}: ${txt}`);
-  }
-  return r.json();
-}
-
-
-// src/lib/api.ts
-export type DocAIImportResp = {
-  doc_id: string;
-  pages: Array<{page:number;width:number;height:number}>;
-  boxes: Array<{page:number;x0:number;y0:number;x1:number;y1:number;text?:string}>;
-  rows: Array<{key:string;value:string;rects?:Array<{page:number;x0:number;y0:number;x1:number;y1:number}>}>;
-};
-
-export async function importDocAI(jsonFile: File): Promise<DocAIImportResp> {
-  const fd = new FormData();
-  fd.append("docai_json", jsonFile);
-  const r = await fetch(`${API}/lasso/docai/import`, { method: "POST", body: fd });
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }

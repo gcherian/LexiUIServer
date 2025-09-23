@@ -1,0 +1,177 @@
+/* File: src/assets/stylesheets/lasso.css */
+
+/* Layout */
+.workbench {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  gap: 10px;
+  padding: 10px;
+  box-sizing: border-box;
+  background: #0b0f14; /* dark-ish */
+  color: #e5e7eb;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+.wb-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  background: #121821;
+  border: 1px solid #1f2937;
+  border-radius: 10px;
+}
+
+.toolbar-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.section-title {
+  font-weight: 600;
+  color: #9ca3af;
+  letter-spacing: .02em;
+  margin: 6px 0 8px;
+}
+
+.placeholder {
+  padding: 18px;
+  color: #94a3b8;
+  background: #0f172a;
+  border: 1px dashed #334155;
+  border-radius: 8px;
+}
+
+.page-indicator {
+  font-variant-numeric: tabular-nums;
+  color: #9ca3af;
+  padding: 0 6px;
+}
+
+/* Split */
+.wb-split { flex: 1 1 auto; }
+.wb-left {
+  background: #0f172a;
+  border: 1px solid #1f2937;
+  border-radius: 10px;
+  padding: 8px;
+  max-height: 100%;
+}
+.wb-right {
+  background: #0f172a;
+  border: 1px solid #1f2937;
+  border-radius: 10px;
+  padding: 8px;
+  max-height: 100%;
+}
+
+/* Inputs & buttons */
+.input {
+  background: #0b1220;
+  color: #e5e7eb;
+  border: 1px solid #1f2937;
+  border-radius: 8px;
+  padding: 6px 8px;
+  outline: none;
+  min-width: 280px;
+}
+.input::placeholder { color: #6b7280; }
+
+.btn {
+  user-select: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: #0b1220;
+  color: #e5e7eb;
+  border: 1px solid #1f2937;
+  border-radius: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  transition: background .15s ease;
+}
+.btn:hover { background: #0f172a; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn.toggle {
+  background: #0b1220;
+}
+.btn.toggle.active {
+  background: #1f2937;
+  border-color: #374151;
+}
+
+/* Table */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 13px;
+}
+thead th {
+  text-align: left;
+  color: #9ca3af;
+  font-weight: 600;
+  padding: 6px 8px;
+  border-bottom: 1px solid #1f2937;
+}
+tbody td {
+  padding: 6px 8px;
+  border-bottom: 1px solid #111827;
+  color: #e5e7eb;
+}
+tbody tr:hover {
+  background: #0b1220;
+  cursor: pointer;
+}
+
+/* PDF stage */
+.pdf-stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  background: #0b0f14;
+  border-radius: 8px;
+}
+
+/* Overlay (tokens, main rect, model overlays) */
+.overlay {
+  position: absolute;
+  inset: 0;
+  background: transparent;
+  user-select: none;
+}
+
+/* token boxes (orange) */
+.overlay .tok {
+  border: 1px solid rgba(255, 165, 0, 0.55);
+  background: rgba(255, 165, 0, 0.10);
+  pointer-events: none;
+}
+
+/* main editable box (pink) */
+.overlay .pink {
+  border: 2px solid rgba(236, 72, 153, 0.95);
+  background: rgba(236, 72, 153, 0.18);
+  box-shadow: 0 0 0 1px rgba(236,72,153,0.25) inset;
+  pointer-events: none;
+}
+
+/* resize handles */
+.overlay .handle {
+  position: absolute;
+  border-radius: 3px;
+  background: rgba(236,72,153,0.95);
+  box-shadow: 0 0 0 2px #fff inset, 0 0 0 1px rgba(236,72,153,0.8);
+  pointer-events: none;
+}
+
+/* small utility */
+.muted { color: #9ca3af; font-size: 12px; }
