@@ -1,0 +1,62 @@
+// ids & meta
+type CaseId = string;
+type Money = string;        // e.g. "1,501.24"
+type IsoDate = string;      // "2025-05-27"
+type BBox = { page: number; x0:number; y0:number; x1:number; y1:number };
+
+// ---- Canonical Entities (merged from SoRs + PDF) ----
+export type MacpCase = {
+  case_id: CaseId;
+  batch: string;
+  source_system_ref: { // pointers to SoRs
+    indigo?: { sample_id: string; trans_number: string };
+    infolease?: { contract_number: string; transaction_number?: string };
+    siebel?: { sr_number?: string; tid?: string };
+    filenet?: { invoice_number?: string; doc_path?: string };
+  };
+
+  core: { // SoR snapshot
+    contract_number: string;
+    transaction: {
+      transaction_number?: string;
+      date_received?: IsoDate;         // InfoLease / Siebel
+      date_posted?: IsoDate;           // InfoLease
+      amount_received?: Money;         // InfoLease
+      check_number?: string;           // InfoLease / Siebel
+      check_amount?: Money;            // InfoLease
+      invoice_number?: string;         // InfoLease
+      line_items?: Array<{
+        type: "rent"|"tax"|"misc"|"late"|"interest"|"unknown";
+        description?: string;
+        amount?: Money;
+      }>;
+    };
+  };
+
+  pdf: { // extracted from FileNet PDF
+    doc_id: string;
+    url_or_path: string;
+    invoice_number?: string;
+    contract_numbers?: string[];      // can be multiple per invoice
+    totals?: { item_total?: Money; tax?: Money; invoice_total?: Money };
+    check?: { number?: string; amount?: Money };
+    breakdown?: Array<{ label: string; amount: Money; bbox?: BBox }>;
+    evidence?: Record<string, BBox[]>; // "contract_number" | "invoice_total" | etc
+  };
+
+  // running results
+  checks?: CheckResult[];             // from A4
+  resolution?: { decision: "pass"|"fail"; notes?: string; at: string; by: string };
+
+  // audit
+  provenance?: { created_at: string; updated_at?: string; model_versions?: Record<string,string> };
+};
+
+export type CheckResult = {
+  id: string;                          // e.g., "MACP.Q1.DATES_30D"
+  title: string;                       // human label
+  status: "pass"|"warn"|"fail"|"na";
+  message?: string;
+  evidence?: Array<{ field: string; core?: any; pdf?: any; bbox?: BBox }>;
+  actions?: Array<{ label: string; kind: "lasso"|"accept-pdf"|"accept-core"|"explain"; payload?: any }>;
+};
