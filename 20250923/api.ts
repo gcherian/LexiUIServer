@@ -64,3 +64,20 @@ export async function matchField(
   }
   return r.json();
 }
+
+
+// src/lib/api.ts
+export type DocAIImportResp = {
+  doc_id: string;
+  pages: Array<{page:number;width:number;height:number}>;
+  boxes: Array<{page:number;x0:number;y0:number;x1:number;y1:number;text?:string}>;
+  rows: Array<{key:string;value:string;rects?:Array<{page:number;x0:number;y0:number;x1:number;y1:number}>}>;
+};
+
+export async function importDocAI(jsonFile: File): Promise<DocAIImportResp> {
+  const fd = new FormData();
+  fd.append("docai_json", jsonFile);
+  const r = await fetch(`${API}/lasso/docai/import`, { method: "POST", body: fd });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
