@@ -26,3 +26,32 @@
 canvas { image-rendering: crisp-edges; image-rendering: pixelated; background: #fff; }
 
 import FieldLevelEditor from "../components/bbox/FieldLevelEditor";
+
+
+//
+// inside your effect that renders the page
+const stage = stageRef.current!; // <div className="pdf-stage" ref={stageRef} />
+const cvs = canvasRef.current!;
+const baseW = serverW || 800;
+const scale = Math.min( (stage.clientWidth - 24) / baseW, 3 ); // 24 = padding
+cvs.width  = Math.floor(baseW * scale);
+cvs.height = Math.floor((serverH || 1100) * scale);
+
+const ctx = cvs.getContext("2d")!;
+await pdfPage.render({
+  canvasContext: ctx,
+  viewport: pdfPage.getViewport({ scale }),
+}).promise;
+
+
+<div className="pdf-stage">
+  <canvas ref={canvasRef} className="pdf-canvas" />
+  {/* absolutely positioned overlay divs can be appended here if you draw overlays in DOM */}
+</div>
+
+
+import { GlobalWorkerOptions } from "pdfjs-dist";
+GlobalWorkerOptions.workerSrc =
+  (import.meta as any).env?.VITE_PDF_WORKER ||
+  new URL("pdfjs-dist/build/pdf.worker.min.js", import.meta.url).toString();
+
