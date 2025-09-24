@@ -1,0 +1,11 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root{ --panel:#0b1020; --panel-2:#0f162d; --ink:#e8ecff; --acc:#5B6CFF; }
+body{ background:#070b1a; color:var(--ink); font-family: ui-sans-serif,system-ui; }
+.card{ background:var(--panel-2); border:1px solid #1f2a4a; border-radius:12px; }
+.btn{ @apply px-3 py-2 rounded-md text-sm bg-brand-600 hover:opacity-90; }
+.pill{ @apply px-2 py-1 rounded-full text-xs bg-white/10; }
+input,select,textarea{ background:#0c1430; border:1px solid #25335b; border-radius:8px; padding:8px; color:var(--ink); width:100%;}
+label{ @apply text-xs uppercase tracking-wide opacity-70; }
