@@ -1,0 +1,56 @@
+/* viewport & app shell */
+html, body, #root { height: 100%; margin: 0; }
+
+/* top toolbar */
+.wb-toolbar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border-bottom: 1px solid #e5e7eb; background: #fafafa;
+}
+.wb-toolbar .btn {
+  display: inline-flex; align-items: center;
+  padding: 4px 10px; border: 1px solid #d1d5db; border-radius: 6px;
+  background: #fff; cursor: pointer; font-size: 12px; user-select: none;
+}
+.wb-toolbar .btn.toggle input { display: none; }
+.wb-toolbar .btn.toggle.active { background:#eef2ff; border-color:#6366f1; }
+.wb-toolbar .input { padding: 5px 8px; border: 1px solid #d1d5db; border-radius: 6px; }
+.wb-toolbar .spacer { flex: 1; }
+.wb-toolbar .muted { color: #6b7280; font-size: 12px; }
+.toolbar-inline { display: inline-flex; align-items: center; }
+
+/* 2-pane workbench */
+.workbench { display: flex; flex-direction: column; height: 100%; }
+.wb-split { flex: 1; display: flex; gap: 12px; overflow: hidden; }
+.wb-left  { flex: 0 0 30%; overflow: auto; border-right: 1px solid #e5e7eb; }
+.wb-right { flex: 1 1 70%; overflow: auto; }
+
+.section-title { padding: 8px 10px; font-weight: 600; border-bottom: 1px solid #e5e7eb; }
+.placeholder { padding: 12px; color: #6b7280; }
+
+/* table */
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #f1f5f9; }
+td code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+/* PDF canvas region */
+.pdf-stage {
+  position: relative;
+  width: 100%;
+  /* give the stage a reasonable height so the canvas is visible */
+  min-height: 600px;
+  padding: 12px;
+  box-sizing: border-box;
+  background: #f8fafc;
+}
+.pdf-canvas {
+  display: block;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,.08);
+  border: 1px solid #e5e7eb;
+}
+
+/* overlay boxes */
+.ov-box {
+  position: absolute; pointer-events: none;
+  border: 2px solid transparent; box-sizing: border-box;
+}
