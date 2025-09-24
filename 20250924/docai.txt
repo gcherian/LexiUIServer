@@ -1,0 +1,525 @@
+docai-kv-highlighter/
+├─ package.json
+├─ vite.config.js
+├─ index.html
+└─ src/
+   ├─ main.jsx
+   ├─ App.jsx
+   ├─ style.css
+   ├─ components/
+   │   ├─ KVPane.jsx
+   │   └─ PdfPane.jsx
+   └─ lib/
+       ├─ docai.js
+       └─ match.js
+
+
+//
+
+{
+  "name": "docai-kv-highlighter",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "vite",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^4.4.168",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tesseract.js": "^5.1.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "vite": "^5.4.2"
+  }
+}
+
+//
+
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+export default defineConfig({ plugins: [react()] });
+
+
+//
+
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DocAI KV Highlighter</title>
+  </head>
+  <body style="margin:0;background:#0b0f1a;color:#e8ecff;font-family:system-ui">
+    <div id="root" style="height:100vh"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+
+//main.jsx
+
+import React from "react";
+import { createRoot } from "react-dom/client";
+import App from "./App.jsx";
+createRoot(document.getElementById("root")).render(<App />);
+
+//App.jsx
+
+import React, { useRef, useState } from "react";
+import KVPane from "./components/KVPane.jsx";
+import PdfPane from "./components/PdfPane.jsx";
+import { parseDocAIToKV } from "./lib/docai.js";
+import "./style.css";
+
+export default function App() {
+  const [pdfUrl, setPdfUrl] = useState("");
+  const [kvs, setKvs] = useState([]); // [{ key, value }]
+  const pdfRef = useRef(null);
+
+  async function onUploadPdf(e) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setPdfUrl(URL.createObjectURL(f));
+  }
+
+  async function onUploadDocAI(e) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    const json = JSON.parse(await f.text());
+    setKvs(parseDocAIToKV(json));
+  }
+
+  function onLocate(valueStr) {
+    pdfRef.current?.locateValue(valueStr);
+  }
+
+  return (
+    <div className="app">
+      <div className="topbar">
+        <div className="brand">DocAI KV Highlighter</div>
+        <div className="toolbar">
+          <label className="btn">
+            <input type="file" accept="application/pdf" onChange={onUploadPdf} />
+            Choose PDF
+          </label>
+          <label className="btn">
+            <input type="file" accept="application/json" onChange={onUploadDocAI} />
+            Choose DocAI JSON
+          </label>
+        </div>
+      </div>
+
+      <div className="split">
+        <KVPane kvs={kvs} onPick={onLocate} />
+        <PdfPane ref={pdfRef} pdfUrl={pdfUrl} />
+      </div>
+    </div>
+  );
+}
+
+//style.css
+
+.app{display:flex;flex-direction:column;height:100%}
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #1f2a4a;background:#0f162d}
+.brand{font-weight:700}
+.toolbar{display:flex;gap:8px}
+.btn{display:inline-block;background:#5B6CFF;color:#fff;padding:6px 10px;border-radius:8px;cursor:pointer}
+.btn input{display:none}
+.split{display:flex;gap:12px;height:100%}
+.left{width:36%;min-width:380px;overflow:auto;border-right:1px solid #1f2a4a;background:#0f162d}
+.right{flex:1;position:relative;overflow:auto;background:#0b0f1a}
+.table{width:100%;border-collapse:collapse}
+.table td,.table th{border-bottom:1px solid #1f2a4a;padding:8px;vertical-align:top}
+.table tr{cursor:pointer}
+.table tr:hover{background:#0c1430}
+code{background:#0c1430;padding:3px 5px;border-radius:6px}
+.pagebar{position:sticky;top:0;left:0;background:#0f162d;border-bottom:1px solid #1f2a4a;padding:8px;z-index:2}
+.overlay .hit{border:2px solid #ec4899;background:rgba(236,72,153,0.18);position:absolute;box-shadow:0 0 0 1px rgba(236,72,153,0.3) inset}
+
+
+
+// docai.js
+
+/**
+ * Parse Google Document AI output into flat KVs for the left pane.
+ * We ignore DocAI's own bboxes (often unreliable) and just extract keys/values.
+ */
+export function parseDocAIToKV(doc) {
+  const root = doc.document || doc;
+  const kvs = [];
+
+  // 1) formFields on pages
+  (root.pages || []).forEach(p =>
+    (p.formFields || []).forEach(ff => {
+      const k = ff.fieldName?.text || ff.fieldName?.content || "";
+      const v = ff.fieldValue?.text || ff.fieldValue?.content || "";
+      if (k || v) kvs.push({ key: k, value: v });
+    })
+  );
+
+  // 2) entities + properties
+  (root.entities || []).forEach(e => {
+    const val = e.mentionText || e.normalizedValue?.text || "";
+    if (e.type && val) kvs.push({ key: e.type, value: val });
+    (e.properties || []).forEach(p => {
+      const k = [e.type, p.type].filter(Boolean).join(".");
+      const v = p.mentionText || p.normalizedValue?.text || "";
+      if (v) kvs.push({ key: k, value: v });
+    });
+  });
+
+  // 3) generic keyValuePairs
+  (root.keyValuePairs || doc.keyValuePairs || []).forEach(kvp => {
+    const k = kvp.key?.text || kvp.key?.content || "";
+    const v = kvp.value?.text || kvp.value?.content || "";
+    if (k || v) kvs.push({ key: k, value: v });
+  });
+
+  // 4) metadata object map (fallback)
+  const meta = root.metadata || doc.metadata;
+  if (meta && typeof meta === "object") {
+    Object.entries(meta).forEach(([k, v]) => {
+      kvs.push({ key: k, value: typeof v === "string" ? v : JSON.stringify(v) });
+    });
+  }
+
+  // de-dupe conservatively
+  const seen = new Set();
+  return kvs.filter(({ key, value }) => {
+    const s = key + "::" + value;
+    if (seen.has(s)) return false;
+    seen.add(s);
+    return true;
+  });
+}
+
+//match.js
+
+
+export function norm(s){
+  return (s||"").toLowerCase().normalize("NFKC")
+    .replace(/[^\p{L}\p{N}\s]/gu," ").replace(/\s+/g," ").trim();
+}
+export function normNum(s){
+  return (s||"").toLowerCase().normalize("NFKC")
+    .replace(/[,$]/g,"").replace(/\s+/g," ").trim();
+}
+export function levRatio(a,b){
+  const m=a.length,n=b.length; if(!m && !n) return 1;
+  const dp=Array(n+1).fill(0); for(let j=0;j<=n;j++) dp[j]=j;
+  for(let i=1;i<=m;i++){ let prev=dp[0]; dp[0]=i;
+    for(let j=1;j<=n;j++){ const tmp=dp[j];
+      dp[j]=Math.min(dp[j]+1, dp[j-1]+1, prev+(a[i-1]===b[j-1]?0:1)); prev=tmp;}}
+  return 1 - dp[n]/Math.max(1,Math.max(m,n));
+}
+export function unionRect(span){
+  let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+  for(const t of span){ x0=Math.min(x0,t.x0); y0=Math.min(y0,t.y0);
+    x1=Math.max(x1,t.x1); y1=Math.max(y1,t.y1); }
+  return {x0,y0,x1,y1};
+}
+
+/** tokens: [{page, x0,y0,x1,y1, text}] */
+export function locateValue(valueRaw, tokens, maxWindow=16){
+  const raw=(valueRaw||"").trim(); if(!raw) return null;
+  const looksNum=/^[\s\-$€£₹,.\d/]+$/.test(raw);
+  const target=looksNum? normNum(raw) : norm(raw);
+
+  const byPg=new Map();
+  for(const t of tokens){ (byPg.get(t.page)||byPg.set(t.page,[]).get(t.page)).push(t); }
+  for(const arr of byPg.values()) arr.sort((a,b)=> (a.y0===b.y0? a.x0-b.x0 : a.y0-b.y0));
+
+  let best=null;
+  byPg.forEach((arr,pg)=>{
+    const n=arr.length;
+    for(let i=0;i<n;i++){
+      const span=[];
+      for(let w=0; w<maxWindow && i+w<n; w++){
+        const t=arr[i+w]; const tok=(t.text||"").trim(); if(!tok) continue; span.push(t);
+        const txt=span.map(s=>s.text||"").join(" ").toLowerCase().normalize("NFKC").replace(/[^\p{L}\p{N}\s]/gu," ");
+        const fuzz=levRatio(looksNum? normNum(txt) : norm(txt), target);
+        if(!best || fuzz>best.score) best={score:fuzz,page:pg,span:[...span]};
+      }
+    }
+  });
+  if(!best) return null;
+  return { page: best.page, rect: unionRect(best.span), score: best.score };
+}
+
+
+//KVPane.jsx
+
+import React from "react";
+
+export default function KVPane({ kvs, onPick }) {
+  return (
+    <div className="left">
+      <div style={{padding:"10px 12px",borderBottom:"1px solid #1f2a4a"}}><b>Extraction (DocAI KV)</b></div>
+      {!kvs?.length ? (
+        <div style={{opacity:.7,padding:12}}>Upload a DocAI JSON to view keys/values.</div>
+      ) : (
+        <table className="table">
+          <thead><tr><th style={{width:"42%"}}>Key</th><th>Value</th></tr></thead>
+          <tbody>
+            {kvs.map((r, i)=>(
+              <tr key={r.key+":"+i} onClick={()=>onPick(r.value)} title="Click to highlight in PDF">
+                <td><code>{r.key}</code></td>
+                <td>{r.value}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+//PdfPane.jsx
+import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { GlobalWorkerOptions, getDocument } from "pdfjs-dist";
+import Tesseract from "tesseract.js";
+import { locateValue } from "../lib/match.js";
+
+GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
+
+function PdfPaneImpl({ pdfUrl }, ref) {
+  const canvasRef = useRef(null);
+  const overlayRef = useRef(null);
+  const [page, setPage] = useState(1);
+  const [numPages, setNumPages] = useState(0);
+  const [tokens, setTokens] = useState([]); // [{page,x0,y0,x1,y1,text}]
+  const [hit, setHit] = useState(null);
+
+  useImperativeHandle(ref, ()=>({
+    async locateValue(value) {
+      if (!value || !tokens.length) return;
+      // try text-layer first
+      let res = locateValue(value, tokens);
+      // OCR fallback if nothing found and we have a canvas
+      if (!res && canvasRef.current) {
+        const ocrToks = await ocrCurrentPage(canvasRef.current);
+        const merged = tokens.concat(ocrToks.map(t => ({...t, page})));
+        res = locateValue(value, merged);
+      }
+      if (res) {
+        setPage(res.page);
+        setHit(res);
+        requestAnimationFrame(() => drawOverlay());
+      }
+    }
+  }));
+
+  useEffect(()=>{ (async ()=>{
+    if(!pdfUrl) return;
+    const doc = await getDocument(pdfUrl).promise;
+    setNumPages(doc.numPages);
+    await renderPage(doc, page);
+  })(); }, [pdfUrl, page]);
+
+  async function renderPage(doc, pageNum){
+    const pg = await doc.getPage(pageNum);
+    const vp = pg.getViewport({ scale: Math.min(1, 1400/Math.max(pg.view[2],pg.view[3])) });
+    const c = canvasRef.current; const ctx = c.getContext("2d");
+    c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
+    c.style.width = `${c.width}px`; c.style.height = `${c.height}px`;
+    await pg.render({ canvasContext: ctx, viewport: vp }).promise;
+
+    const text = await pg.getTextContent();
+    const pageTokens = itemsToTokens(text.items, vp, pageNum);
+    setTokens(prev => [...prev.filter(t=>t.page!==pageNum), ...pageTokens]);
+    drawOverlay();
+  }
+
+  function itemsToTokens(items, vp, pg){
+    const toks = [];
+    for(const it of items){
+      const tx = it.transform; // [a,b,c,d,e,f]
+      const x = tx[4], y = tx[5];
+      const h = Math.abs(tx[3] || 10);
+      const w = it.width;
+      const yTop = vp.height - y; // flip origin
+      toks.push({ page: pg, x0:x, y0:yTop-h, x1:x+w, y1:yTop, text:it.str });
+    }
+    return toks;
+  }
+
+  async function ocrCurrentPage(canvas){
+    const { data:{ words } } = await Tesseract.recognize(canvas, "eng");
+    return (words||[]).map(w=>({ text:w.text, x0:w.bbox.x0, y0:w.bbox.y0, x1:w.bbox.x1, y1:w.bbox.y1 }));
+  }
+
+  function drawOverlay(){
+    const o = overlayRef.current; if(!o) return;
+    o.innerHTML = "";
+    if(hit && hit.page===page){
+      const d = document.createElement("div");
+      d.className = "hit";
+      place(d, hit.rect.x0, hit.rect.y0, hit.rect.x1, hit.rect.y1);
+      o.appendChild(d);
+    }
+  }
+
+  function place(el,x0,y0,x1,y1){
+    const c = canvasRef.current;
+    const R = c.getBoundingClientRect();
+    const sx = R.width / c.width, sy = R.height / c.height;
+    Object.assign(el.style, {
+      position:"absolute",
+      left:`${Math.min(x0,x1)*sx}px`,
+      top:`${Math.min(y0,y1)*sy}px`,
+      width:`${Math.abs(x1-x0)*sx}px`,
+      height:`${Math.abs(y1-y0)*sy}px`
+    });
+  }
+
+  return (
+    <div className="right">
+      <div className="pagebar">
+        <button disabled={!pdfUrl || page<=1} onClick={()=>setPage(p=>p-1)}>Prev</button>
+        <span style={{margin:"0 8px"}}>Page {page}{numPages?` / ${numPages}`:""}</span>
+        <button disabled={!pdfUrl || (numPages && page>=numPages)} onClick={()=>setPage(p=>p+1)}>Next</button>
+      </div>
+      {!pdfUrl ? (
+        <div style={{opacity:.7,padding:12}}>Upload a PDF to view.</div>
+      ) : (
+        <div style={{position:"relative"}}>
+          <canvas ref={canvasRef}/>
+          <div ref={overlayRef} className="overlay" style={{position:"absolute",left:0,top:0,right:0,bottom:0}}/>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default forwardRef(PdfPaneImpl);
+
+
+//run
+
+import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { GlobalWorkerOptions, getDocument } from "pdfjs-dist";
+import Tesseract from "tesseract.js";
+import { locateValue } from "../lib/match.js";
+
+GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
+
+function PdfPaneImpl({ pdfUrl }, ref) {
+  const canvasRef = useRef(null);
+  const overlayRef = useRef(null);
+  const [page, setPage] = useState(1);
+  const [numPages, setNumPages] = useState(0);
+  const [tokens, setTokens] = useState([]); // [{page,x0,y0,x1,y1,text}]
+  const [hit, setHit] = useState(null);
+
+  useImperativeHandle(ref, ()=>({
+    async locateValue(value) {
+      if (!value || !tokens.length) return;
+      // try text-layer first
+      let res = locateValue(value, tokens);
+      // OCR fallback if nothing found and we have a canvas
+      if (!res && canvasRef.current) {
+        const ocrToks = await ocrCurrentPage(canvasRef.current);
+        const merged = tokens.concat(ocrToks.map(t => ({...t, page})));
+        res = locateValue(value, merged);
+      }
+      if (res) {
+        setPage(res.page);
+        setHit(res);
+        requestAnimationFrame(() => drawOverlay());
+      }
+    }
+  }));
+
+  useEffect(()=>{ (async ()=>{
+    if(!pdfUrl) return;
+    const doc = await getDocument(pdfUrl).promise;
+    setNumPages(doc.numPages);
+    await renderPage(doc, page);
+  })(); }, [pdfUrl, page]);
+
+  async function renderPage(doc, pageNum){
+    const pg = await doc.getPage(pageNum);
+    const vp = pg.getViewport({ scale: Math.min(1, 1400/Math.max(pg.view[2],pg.view[3])) });
+    const c = canvasRef.current; const ctx = c.getContext("2d");
+    c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
+    c.style.width = `${c.width}px`; c.style.height = `${c.height}px`;
+    await pg.render({ canvasContext: ctx, viewport: vp }).promise;
+
+    const text = await pg.getTextContent();
+    const pageTokens = itemsToTokens(text.items, vp, pageNum);
+    setTokens(prev => [...prev.filter(t=>t.page!==pageNum), ...pageTokens]);
+    drawOverlay();
+  }
+
+  function itemsToTokens(items, vp, pg){
+    const toks = [];
+    for(const it of items){
+      const tx = it.transform; // [a,b,c,d,e,f]
+      const x = tx[4], y = tx[5];
+      const h = Math.abs(tx[3] || 10);
+      const w = it.width;
+      const yTop = vp.height - y; // flip origin
+      toks.push({ page: pg, x0:x, y0:yTop-h, x1:x+w, y1:yTop, text:it.str });
+    }
+    return toks;
+  }
+
+  async function ocrCurrentPage(canvas){
+    const { data:{ words } } = await Tesseract.recognize(canvas, "eng");
+    return (words||[]).map(w=>({ text:w.text, x0:w.bbox.x0, y0:w.bbox.y0, x1:w.bbox.x1, y1:w.bbox.y1 }));
+  }
+
+  function drawOverlay(){
+    const o = overlayRef.current; if(!o) return;
+    o.innerHTML = "";
+    if(hit && hit.page===page){
+      const d = document.createElement("div");
+      d.className = "hit";
+      place(d, hit.rect.x0, hit.rect.y0, hit.rect.x1, hit.rect.y1);
+      o.appendChild(d);
+    }
+  }
+
+  function place(el,x0,y0,x1,y1){
+    const c = canvasRef.current;
+    const R = c.getBoundingClientRect();
+    const sx = R.width / c.width, sy = R.height / c.height;
+    Object.assign(el.style, {
+      position:"absolute",
+      left:`${Math.min(x0,x1)*sx}px`,
+      top:`${Math.min(y0,y1)*sy}px`,
+      width:`${Math.abs(x1-x0)*sx}px`,
+      height:`${Math.abs(y1-y0)*sy}px`
+    });
+  }
+
+  return (
+    <div className="right">
+      <div className="pagebar">
+        <button disabled={!pdfUrl || page<=1} onClick={()=>setPage(p=>p-1)}>Prev</button>
+        <span style={{margin:"0 8px"}}>Page {page}{numPages?` / ${numPages}`:""}</span>
+        <button disabled={!pdfUrl || (numPages && page>=numPages)} onClick={()=>setPage(p=>p+1)}>Next</button>
+      </div>
+      {!pdfUrl ? (
+        <div style={{opacity:.7,padding:12}}>Upload a PDF to view.</div>
+      ) : (
+        <div style={{position:"relative"}}>
+          <canvas ref={canvasRef}/>
+          <div ref={overlayRef} className="overlay" style={{position:"absolute",left:0,top:0,right:0,bottom:0}}/>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default forwardRef(PdfPaneImpl);
+
+
+
