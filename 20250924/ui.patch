@@ -1,0 +1,28 @@
+- import "pdfjs-dist/web/pdf_viewer.css";
++ // NOTE: Do NOT import pdfjs-dist/web/pdf_viewer.css.
++ // It contains PostCSS-only declarations that Sass chokes on in this setup.
+
+/* Minimal viewer styles so the canvas behaves without pdf_viewer.css */
+
+.workbench { display: flex; flex-direction: column; height: 100%; }
+.wb-toolbar { display: flex; align-items: center; padding: 8px; gap: 8px; }
+.wb-split { flex: 1 1 auto; }
+
+.wb-left table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.wb-left th, .wb-left td { padding: 6px 8px; border-bottom: 1px solid #eee; }
+.wb-left tr:hover { background: #fafafa; cursor: pointer; }
+.section-title { font-weight: 600; margin: 8px 0; }
+.placeholder { color: #888; padding: 8px; }
+
+.btn { padding: 6px 10px; border: 1px solid #ddd; background: #fff; cursor: pointer; }
+.btn.toggle { display: inline-flex; align-items: center; gap: 6px; }
+.btn.toggle.active { background: #f3f4f6; }
+
+.input { padding: 6px 8px; border: 1px solid #ddd; border-radius: 2px; }
+
+.toolbar-inline { display: inline-flex; align-items: center; }
+.spacer { flex: 1 1 auto; }
+
+canvas { image-rendering: crisp-edges; image-rendering: pixelated; background: #fff; }
+
+import FieldLevelEditor from "../components/bbox/FieldLevelEditor";
