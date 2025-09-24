@@ -1,0 +1,85 @@
+// src/lib/docai.js
+function flatten(obj, prefix = "", out = []) {
+  if (obj == null) return out;
+  if (Array.isArray(obj)) {
+    obj.forEach((v, i) => flatten(v, `${prefix}[${i}]`, out));
+    return out;
+  }
+  if (typeof obj === "object") {
+    Object.entries(obj).forEach(([k, v]) => {
+      const path = prefix ? `${prefix}.${k}` : k;
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        flatten(v, path, out);
+      } else {
+        out.push({ key: path, value: v == null ? "" : String(v) });
+      }
+    });
+    return out;
+  }
+  out.push({ key: prefix || "(value)", value: String(obj) });
+  return out;
+}
+
+/**
+ * Parse your DocAI output into a flat KV list for the left pane.
+ * Supports:
+ * - documents.properties[0]  (your metadata map)
+ * - document.pages[].formFields[]
+ * - document.entities[] (+ properties)
+ * - keyValuePairs[]
+ * - document.metadata (fallback)
+ */
+export function parseDocAIToKV(doc) {
+  const kvs = [];
+  const root = doc.document || doc.documents || doc;
+
+  // (A) Your metadata map: documents.properties[0]
+  const propsArr = root?.properties;
+  if (Array.isArray(propsArr) && propsArr.length && typeof propsArr[0] === "object") {
+    kvs.push(...flatten(propsArr[0]));
+  }
+
+  // (B) Standard DocAI formFields (if present)
+  (root.pages || []).forEach(p =>
+    (p.formFields || []).forEach(ff => {
+      const k = ff.fieldName?.text || ff.fieldName?.content || "";
+      const v = ff.fieldValue?.text || ff.fieldValue?.content || "";
+      if (k || v) kvs.push({ key: k, value: v });
+    })
+  );
+
+  // (C) Entities + properties (invoice/receipt parsers)
+  (root.entities || []).forEach(e => {
+    const val = e.mentionText || e.normalizedValue?.text || "";
+    if (e.type && val) kvs.push({ key: e.type, value: val });
+    (e.properties || []).forEach(p => {
+      const k = [e.type, p.type].filter(Boolean).join(".");
+      const v = p.mentionText || p.normalizedValue?.text || "";
+      if (v) kvs.push({ key: k, value: v });
+    });
+  });
+
+  // (D) Generic keyValuePairs[]
+  (root.keyValuePairs || doc.keyValuePairs || []).forEach(kvp => {
+    const k = kvp.key?.text || kvp.key?.content || "";
+    const v = kvp.value?.text || kvp.value?.content || "";
+    if (k || v) kvs.push({ key: k, value: v });
+  });
+
+  // (E) document.metadata/fallback
+  const meta = root.metadata || doc.metadata;
+  if (meta && typeof meta === "object") {
+    Object.entries(meta).forEach(([k, v]) => {
+      kvs.push({ key: k, value: typeof v === "string" ? v : JSON.stringify(v) });
+    });
+  }
+
+  // Deduplicate
+  const seen = new Set();
+  return kvs.filter(({ key, value }) => {
+    const s = key + "::" + value;
+    if (seen.has(s)) return false;
+    seen.add(s);
+    return true;
+  });
+}
