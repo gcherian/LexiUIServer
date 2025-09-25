@@ -1,53 +1,48 @@
-// src/components/KVPane.jsx
 import React from "react";
 
-export default function KVPane({ header = {}, elements = [], onHoverDocAI, onPickValue }) {
-  const headerEntries = Object.entries(header);
+export default function KVPane({ data, pdfRef }) {
+  const hdr = data?.header ?? [];
+  const elts = data?.elements ?? [];
 
   return (
-    <div className="left">
-      <div style={{padding:"10px 12px",borderBottom:"1px solid #1f2a4a"}}>
-        <b>DocAI Header</b>
-        {!headerEntries.length && <div style={{opacity:.6}}>Upload DocAI JSON</div>}
-      </div>
-      {headerEntries.length > 0 && (
-        <table className="table">
-          <thead><tr><th style={{width:"42%"}}>Key</th><th>Value</th></tr></thead>
-          <tbody>
-            {headerEntries.map(([k, v]) => (
-              <tr key={k}><td><code>{k}</code></td><td>{String(v)}</td></tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+    <div style={{overflow:"auto", borderRight:"1px solid #1f2937", padding:"8px"}}>
+      <div style={{opacity:.75, margin:"6px 0"}}>DocAI Header</div>
+      <table style={{width:"100%", fontSize:12}}>
+        <tbody>
+          {hdr.map((h,i)=>(
+            <tr key={"h"+i}><td style={{opacity:.7}}>{h.key}</td><td>{String(h.value)}</td></tr>
+          ))}
+        </tbody>
+      </table>
 
-      <div style={{padding:"10px 12px",borderTop:"1px solid #1f2a4a"}}>
-        <b>DocAI Elements</b>
-        <div style={{opacity:.7,fontSize:12}}>Hover: show DocAI bbox • Click: find true location</div>
+      <div style={{opacity:.75, margin:"12px 0 6px"}}>DocAI Elements</div>
+      <div style={{fontSize:12, opacity:.6, marginBottom:6}}>
+        Hover: show DocAI bbox • Click: find true location
       </div>
 
-      {elements?.length ? (
-        <table className="table">
-          <thead><tr><th>Content</th><th style={{width:72}}>Page</th></tr></thead>
-          <tbody>
-            {elements.map((el, i) => (
-              <tr
-                key={i}
-                onMouseEnter={() => onHoverDocAI?.(el)}
-                onMouseLeave={() => onHoverDocAI?.(null)}
-                onClick={() => onPickValue?.(el.content)}
-                title="Click to locate on PDF"
-                style={{cursor:"pointer"}}
-              >
-                <td>{el.content || <span style={{opacity:.6}}>(empty)</span>}</td>
-                <td>{el.page}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      ) : (
-        <div style={{opacity:.6,padding:"8px 12px"}}>No DocAI page elements found.</div>
-      )}
+      <table style={{width:"100%", fontSize:12}}>
+        <thead>
+          <tr style={{textAlign:"left", opacity:.7}}>
+            <th>Content</th><th style={{width:36}}>Page</th>
+          </tr>
+        </thead>
+        <tbody>
+          {elts.map((r, i)=>(
+            <tr key={i}
+              style={{cursor:"pointer"}}
+              onMouseEnter={()=> pdfRef.current?.showDocAIBbox(r)}
+              onMouseLeave={()=> pdfRef.current?.showDocAIBbox(null)}
+              onClick={()=> {
+                pdfRef.current?.showDocAIBbox(r);
+                pdfRef.current?.locateValue(r.content ?? "");
+              }}
+            >
+              <td style={{padding:"4px 6px"}}>{r.content}</td>
+              <td>{r.page ?? ""}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
