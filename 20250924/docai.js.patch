@@ -1,0 +1,35 @@
+// Accepts your "documents[0].properties.metaDataMap" + "pages[].elements[]"
+export function parseDocAI(raw) {
+  const header = [];
+  const elements = [];
+
+  const doc = raw?.documents?.[0] || raw?.document || raw;
+  const props = doc?.properties || {};
+  const meta = props.metaDataMap || props.metadata || props.metaData || {};
+
+  // header rows
+  for (const k of Object.keys(meta)) {
+    header.push({ key: k, value: meta[k] });
+  }
+
+  // page elements (paragraphs with bbox)
+  const pages = doc?.pages || props?.pages || raw?.pages || [];
+  for (const pIdx in pages) {
+    const p = pages[pIdx];
+    const items = p?.elements || p?.paragraphs || [];
+    for (const it of items) {
+      const bb = it.boundingBox || it.bbox || it.bounding_box;
+      elements.push({
+        page: it.page ?? p.page ?? (+pIdx+1),
+        content: it.content ?? it.text ?? "",
+        bbox: bb ? {
+          x: +bb.x ?? +bb.left ?? 0,
+          y: +bb.y ?? +bb.top ?? 0,
+          width: +bb.width ?? +bb.w ?? 0,
+          height: +bb.height ?? +bb.h ?? 0
+        } : null
+      });
+    }
+  }
+  return { header, elements };
+}
