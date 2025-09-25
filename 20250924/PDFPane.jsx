@@ -1,5 +1,7 @@
 // src/components/PdfPane.jsx
-import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import React, {
+  forwardRef, useEffect, useImperativeHandle, useRef, useState,
+} from "react";
 import { GlobalWorkerOptions, getDocument } from "pdfjs-dist";
 import { locateValue } from "../lib/match.js";
 
@@ -24,11 +26,16 @@ function isBad(bb){
 function PdfPaneImpl({ pdfUrl }, ref) {
   const canvasRef = useRef(null);
   const overlayRef = useRef(null);
+
+  const pdfDocRef = useRef(null);
+  const renderTaskRef = useRef(null);      // <-- keep the active render task
+  const lastVpRef = useRef(null);
+
   const [page, setPage] = useState(1);
   const [numPages, setNumPages] = useState(0);
-  const [tokens, setTokens] = useState([]); // all pages
+  const [tokens, setTokens] = useState([]); // tokens across pages
   const [hit, setHit] = useState(null);
-  const [hover, setHover] = useState(null); // {page,x0,y0,x1,y1}
+  const [hover, setHover] = useState(null);
 
   useImperativeHandle(ref, ()=>({
     locateValue: (value) => {
@@ -36,8 +43,8 @@ function PdfPaneImpl({ pdfUrl }, ref) {
       const res = locateValue(value, tokens);
       setHit(res || null);
       if (res) {
-        setPage(res.page);
-        requestAnimationFrame(drawOverlay);
+        if (res.page !== page) setPage(res.page);
+        else requestAnimationFrame(drawOverlay);
       }
     },
     showDocAIBbox: (el) => {
@@ -48,53 +55,71 @@ function PdfPaneImpl({ pdfUrl }, ref) {
     }
   }));
 
+  // Load the document once
   useEffect(()=>{ (async()=>{
     if (!pdfUrl) return;
+    // cancel any in-flight render
+    if (renderTaskRef.current) {
+      try { await renderTaskRef.current.cancel(); } catch {}
+      renderTaskRef.current = null;
+    }
+    setHit(null); setHover(null); setTokens([]);
     const doc = await getDocument(pdfUrl).promise;
+    pdfDocRef.current = doc;
     setNumPages(doc.numPages);
-    // load all pages’ tokens (fast enough for 1–3 pages)
+
+    // preload tokens for all pages
     const all = [];
     for (let p=1; p<=doc.numPages; p++){
       const pg = await doc.getPage(p);
       const vp = pg.getViewport({ scale: Math.min(1, 1400/Math.max(pg.view[2],pg.view[3])) });
-      if (p === page) await renderPage(pg, vp);
       const text = await pg.getTextContent({ normalizeWhitespace:true, disableCombineTextItems:false });
       all.push(...itemsToTokens(text.items, vp, p));
     }
     setTokens(all);
+    setPage(1);
   })(); }, [pdfUrl]);
 
+  // Render the current page – with renderTask cancellation/await
   useEffect(()=>{ (async()=>{
-    if (!pdfUrl) return;
-    const doc = await getDocument(pdfUrl).promise;
+    const doc = pdfDocRef.current;
+    if (!doc) return;
     const pg = await doc.getPage(page);
     const vp = pg.getViewport({ scale: Math.min(1, 1400/Math.max(pg.view[2],pg.view[3])) });
-    await renderPage(pg, vp);
-  })(); }, [page, pdfUrl]);
+    lastVpRef.current = vp;
 
-  async function renderPage(pg, vp){
     const c = canvasRef.current, ctx = c.getContext("2d");
     c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
     c.style.width = `${c.width}px`; c.style.height = `${c.height}px`;
-    await pg.render({ canvasContext: ctx, viewport: vp }).promise;
-    drawOverlay();
-  }
+
+    // cancel previous render if still running
+    if (renderTaskRef.current) {
+      try { await renderTaskRef.current.cancel(); } catch {}
+      renderTaskRef.current = null;
+    }
+
+    const task = pg.render({ canvasContext: ctx, viewport: vp });
+    renderTaskRef.current = task;
+    try {
+      await task.promise;         // wait fully
+    } finally {
+      if (renderTaskRef.current === task) renderTaskRef.current = null;
+      drawOverlay();              // overlay only after render completes
+    }
+  })(); }, [page]);
 
   function itemsToTokens(items, vp, pg){
-    // pdf.js text item -> bbox in canvas space
     const toks = [];
     for (const it of items) {
-      const [a,b,c,d,e,f] = it.transform; // text matrix
-      const x = e, y = f;                 // bottom-left
+      // transform → canvas coords
+      const [a,b,c,d,e,f] = it.transform;
+      const x = e, y = f;
       const fontH = Math.abs(d || b || 10);
       const width = it.width;
-      // canvas y grows downward; text matrix y is bottom baseline
       const yTop = vp.height - y;
-      const y0 = yTop - fontH;
-      const x0 = x, x1 = x + width, y1 = yTop;
+      const x0 = x, y0 = yTop - fontH, x1 = x + width, y1 = yTop;
       toks.push({ page: pg, x0, y0, x1, y1, text: it.str });
     }
-    // sort reading order (line, then x)
     toks.sort((A,B)=> (A.y0===B.y0 ? A.x0-B.x0 : A.y0-B.y0));
     return toks;
   }
@@ -113,8 +138,21 @@ function PdfPaneImpl({ pdfUrl }, ref) {
   }
 
   function drawOverlay(){
-    const o = overlayRef.current; if (!o) return;
+    const o = overlayRef.current, c = canvasRef.current;
+    if (!o || !c) return;
     o.innerHTML = "";
+
+    // keep overlay in exact canvas position
+    const stage = o.parentElement;
+    const cR = c.getBoundingClientRect();
+    const sR = stage.getBoundingClientRect();
+    Object.assign(o.style, {
+      position: "absolute",
+      left: `${Math.round(cR.left - sR.left)}px`,
+      top: `${Math.round(cR.top - sR.top)}px`,
+      width: `${Math.floor(cR.width)}px`,
+      height: `${Math.floor(cR.height)}px`,
+    });
 
     if (hover && hover.page === page) {
       const d = document.createElement("div");
@@ -142,10 +180,9 @@ function PdfPaneImpl({ pdfUrl }, ref) {
       ) : (
         <div style={{position:"relative"}}>
           <canvas ref={canvasRef}/>
-          <div ref={overlayRef} className="overlay" style={{position:"absolute",left:0,top:0,right:0,bottom:0}}/>
+          <div ref={overlayRef} className="overlay"/>
         </div>
       )}
-
       <style>{`
         .overlay .hit {
           border: 2px solid #ec4899;
