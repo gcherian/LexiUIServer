@@ -1,67 +1,58 @@
-// src/App.jsx
 import React, { useRef, useState } from "react";
-import KVPane from "./components/KVPane.jsx";
-import PdfPane from "./components/PdfPane.jsx";
-import { parseDocAI } from "./lib/docai.js";
-import "./style.css";
+import PdfPane from "./components/PdfPane";
+import KVPane from "./components/KVPane";
+import { parseDocAI } from "./lib/docai";
 
 export default function App() {
-  const [pdfUrl, setPdfUrl] = useState("");
-  const [header, setHeader] = useState({});
-  const [elements, setElements] = useState([]);
   const pdfRef = useRef(null);
 
-  async function onUploadPdf(e) {
+  const [pdfUrl, setPdfUrl] = useState("");
+  const [docai, setDocai] = useState({ header: [], elements: [] });
+
+  async function onChoosePdf(e) {
     const f = e.target.files?.[0];
     if (!f) return;
-    setPdfUrl(URL.createObjectURL(f));
-    e.target.value = "";
+    const url = URL.createObjectURL(f);   // <-- must be a blob URL; not a disk path
+    setPdfUrl(url);
+    console.log("[PDF] url set", url);
   }
 
-  async function onUploadDocAI(e) {
+  async function onChooseDocAI(e) {
     const f = e.target.files?.[0];
     if (!f) return;
     try {
-      const json = JSON.parse(await f.text());
-      const { header, elements } = parseDocAI(json);
-      setHeader(header || {});
-      setElements(elements || []);
-      console.log("[DocAI] header keys:", Object.keys(header || {}));
-      console.log("[DocAI] elements:", elements?.length);
+      const raw = JSON.parse(await f.text());
+      const parsed = parseDocAI(raw);     // {header, elements}
+      console.log("[DocAI] header keys:", parsed.header.map(h=>h.key));
+      console.log("[DocAI] elements:", parsed.elements.length);
+      setDocai(parsed);
     } catch (err) {
       console.error("Invalid JSON:", err);
-      alert("Invalid JSON file.");
-    } finally {
-      e.target.value = "";
+      alert("Invalid DocAI JSON");
     }
   }
 
   return (
-    <div className="app">
-      <div className="topbar">
-        <div className="brand">DocAI KV Highlighter</div>
-        <div className="toolbar">
-          <span style={{opacity:.8,marginRight:8}}>
-            {elements.length ? `${elements.length} elements` : "Upload DocAI JSON"}
-          </span>
-          <label className="btn">
-            <input type="file" accept="application/pdf" onChange={onUploadPdf} />
-            Choose PDF
-          </label>
-          <label className="btn">
-            <input type="file" accept="application/json" onChange={onUploadDocAI} />
-            Choose DocAI JSON
-          </label>
-        </div>
+    <div style={{display:"grid", gridTemplateRows:"48px 1fr", height:"100vh", color:"#e5e7eb", background:"#0b1220"}}>
+      <div style={{display:"flex", alignItems:"center", gap:8, padding:"8px 12px", background:"#111827"}}>
+        <div style={{fontWeight:700}}>DocAI KV Highlighter</div>
+        <div style={{flex:1}} />
+        <span style={{opacity:.7, marginRight:8}}>
+          {docai.elements.length ? `${docai.elements.length} elements` : ""}
+        </span>
+        <label className="btn">
+          <input type="file" accept="application/pdf" onChange={onChoosePdf} style={{display:"none"}} />
+          Choose PDF
+        </label>
+        <label className="btn">
+          <input type="file" accept="application/json" onChange={onChooseDocAI} style={{display:"none"}} />
+          Choose DocAI JSON
+        </label>
+        <style>{`.btn{background:#374151;padding:6px 10px;border-radius:6px;cursor:pointer}`}</style>
       </div>
 
-      <div className="split">
-        <KVPane
-          header={header}
-          elements={elements}
-          onHoverDocAI={(el)=> pdfRef.current?.showDocAIBbox(el)}
-          onPickValue={(value)=> pdfRef.current?.locateValue(value)}
-        />
+      <div style={{display:"grid", gridTemplateColumns:"360px 1fr", minHeight:0}}>
+        <KVPane data={docai} pdfRef={pdfRef} />
         <PdfPane ref={pdfRef} pdfUrl={pdfUrl} />
       </div>
     </div>
